@@ -1,0 +1,6 @@
+Flask>=3.0,<4
+requests>=2.31,<3
+beautifulsoup4>=4.12,<5
+python-dotenv>=1.0,<2
+# Optional: enables the Claude audit rewrite.
+anthropic>=2.0

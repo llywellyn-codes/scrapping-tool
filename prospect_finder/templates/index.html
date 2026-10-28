@@ -1,0 +1,52 @@
+{% extends "base.html" %}
+{% from "_macros.html" import tier_badge with context %}
+{% block title %}Prospects{% endblock %}
+{% block content %}
+<h1>Prospects <span class="muted">({{ prospects|length }})</span></h1>
+<form class="filters" method="get">
+  <input name="q" placeholder="Search name or city" value="{{ filters.q }}">
+  <select name="tier">
+    <option value="">All tiers</option>
+    {% for key, label in TIER_LABELS.items() %}<option value="{{ key }}" {{ 'selected' if filters.tier == key }}>{{ label }}</option>{% endfor %}
+  </select>
+  <select name="status">
+    <option value="">All outreach statuses</option>
+    {% for s in statuses %}<option value="{{ s }}" {{ 'selected' if filters.status == s }}>{{ s.replace('_', ' ') }}</option>{% endfor %}
+  </select>
+  <select name="sort">
+    <option value="score" {{ 'selected' if filters.sort == 'score' }}>Sort by score</option>
+    <option value="coverage" {{ 'selected' if filters.sort == 'coverage' }}>Sort by evidence coverage</option>
+    <option value="name" {{ 'selected' if filters.sort == 'name' }}>Sort by name</option>
+  </select>
+  <button>Filter</button>
+</form>
+{% if not prospects %}
+  <p class="empty">No prospects yet. <a href="{{ url_for('pf.import_page') }}">Import a CSV or search a data source</a>.</p>
+{% else %}
+<div class="table-wrap">
+<table class="prospects">
+  <thead><tr>
+    <th>Prospect</th><th class="num">Score</th><th class="num" title="Business fit / Marketing opportunities / Commercial readiness">Fit · Opp · Ready</th>
+    <th class="num">Coverage</th><th class="num">Confidence</th><th>Tier</th><th>Outreach</th><th>Last checked</th>
+  </tr></thead>
+  <tbody>
+  {% for p in prospects %}
+    {% set c = p.card %}
+    <tr class="{{ 'dnc' if p.outreach.opted_out }}">
+      <td><a href="{{ url_for('pf.prospect', business_id=p.business.id) }}">{{ p.business.display_name }}</a>
+        <div class="muted small">{{ p.business.location or '—' }}</div></td>
+      <td class="num"><strong>{{ c.total|num }}</strong><span class="muted small"> / up to {{ c.upper_bound|num }}</span></td>
+      <td class="num">{{ c.categories.business_fit.score|num }} · {{ c.categories.marketing_opportunity.score|num }} · {{ c.categories.commercial_readiness.score|num }}</td>
+      <td class="num">{{ c.coverage|pct }}</td>
+      <td class="num">{{ '%.2f'|format(c.confidence) }}</td>
+      <td>{{ tier_badge(c) }}</td>
+      <td>{{ 'opted out' if p.outreach.opted_out else p.outreach.status.replace('_', ' ') }}
+        {% if p.outreach.last_contact_date %}<div class="muted small">{{ p.outreach.last_contact_date }}</div>{% endif %}</td>
+      <td class="small">{{ p.business.last_checked_at|dt }}</td>
+    </tr>
+  {% endfor %}
+  </tbody>
+</table>
+</div>
+{% endif %}
+{% endblock %}

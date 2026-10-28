@@ -1,0 +1,30 @@
+{% extends "base.html" %}
+{% block title %}Scoring rubric{% endblock %}
+{% block content %}
+<h1>Scoring rubric</h1>
+<p>Scores are calculated by the application from stored findings — never by a language model. Each signal earns its full weight only when it is <strong>met</strong> and backed by complete, fresh evidence with confidence ≥ {{ policy.min_finding_confidence }}. Unknown signals score 0 and lower evidence coverage instead. Full write-up: <code>docs/SCORING.md</code>.</p>
+<div class="table-wrap"><table class="small">
+<thead><tr><th>Category</th><th>Signal</th><th class="num">Max</th><th>How it is measured</th><th>Overlap rule</th></tr></thead>
+{% for s in signals %}
+<tr><td>{{ CATEGORY_LABELS[s.category] }} ({{ CATEGORY_MAX[s.category]|int }})</td><td><strong>{{ s.label }}</strong><div class="muted"><code>{{ s.key }}</code></div></td>
+<td class="num">{{ s.max_points }}</td><td>{{ s.measured_by }}</td>
+<td>{% if s.group %}Shares the “{{ groups[s.group].label }}” cap of {{ groups[s.group].cap }}{% endif %}
+    {% if s.supersedes %}When met, replaces: {{ s.supersedes|join(', ') }}{% endif %}</td></tr>
+{% endfor %}
+</table></div>
+<h2>Tiers and review</h2>
+<ul>
+  {% for name, minimum in policy.tiers %}<li>Tier {{ name }}: total ≥ {{ minimum }}</li>{% endfor %}
+  <li>Manual review is required (tier shown as provisional) when evidence coverage &lt; {{ (policy.min_coverage * 100)|int }}%, business-fit coverage &lt; {{ (policy.min_category_coverage.business_fit * 100)|int }}%, average confidence &lt; {{ policy.min_confidence }}, or any finding is stale, low-confidence, missing evidence or in conflict.</li>
+  <li>“Not a fit” when roofing is confirmed not to be the primary service; “Do not contact” when opted out.</li>
+</ul>
+<h2>Evidence freshness</h2>
+<ul>{% for src, days in policy.max_evidence_age_days.items() %}<li>{{ src }}: stale after {{ days }} days</li>{% endfor %}</ul>
+<h2>Data sources</h2>
+<div class="table-wrap"><table class="small">
+<thead><tr><th>Source</th><th>Stored</th><th>Exported</th><th>Notes</th></tr></thead>
+{% for s in sources.values() %}<tr><td>{{ s.label }}</td>
+<td>{% if s.retention_days is none %}yes{% elif s.retention_days == 0 %}IDs only{% else %}{{ s.retention_days }} days{% endif %}</td>
+<td>{{ 'yes' if s.exportable else 'no' }}</td><td>{{ s.notes }} {% if s.attribution %}Attribution: {{ s.attribution }}{% endif %}</td></tr>{% endfor %}
+</table></div>
+{% endblock %}

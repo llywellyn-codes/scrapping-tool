@@ -1,0 +1,189 @@
+{% extends "base.html" %}
+{% from "_macros.html" import tier_badge, evidence with context %}
+{% block title %}{{ b.display_name }}{% endblock %}
+{% block content %}
+<div class="head">
+  <div>
+    <h1>{{ b.display_name }}</h1>
+    <div class="muted">{{ b.location or 'Location unknown' }} · prospect #{{ b.id }} · imported from {{ b.primary_source }} · last checked {{ b.last_checked_at|dt }}</div>
+  </div>
+  <div class="actions">
+    {% if b.website or b.google_place_id %}
+    <form method="post" action="{{ url_for('pf.scan', business_id=b.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <button title="Fetch up to a few public pages, respecting robots.txt and rate limits">Scan website</button>
+    </form>
+    {% endif %}
+    <a class="button secondary" href="{{ url_for('pf.audit', business_id=b.id) }}">Audit draft</a>
+  </div>
+</div>
+
+{% if p.outreach.opted_out %}<div class="flash error">Opted out on {{ p.outreach.opted_out_at|dt }}. Do not contact.</div>{% endif %}
+
+<section class="scorecard">
+  <div class="total">
+    <div class="big">{{ card.total|num }}</div>
+    <div class="muted">of 100 · could reach {{ card.upper_bound|num }} if every unknown were met</div>
+    <div class="tierline">{{ tier_badge(card) }}</div>
+  </div>
+  <div class="cats">
+    {% for key, cs in card.categories.items() %}
+    <div class="cat">
+      <div class="catname">{{ cs.label }}</div>
+      <div class="bar"><span style="width: {{ (cs.score / cs.max * 100)|round }}%"></span></div>
+      <div class="small"><strong>{{ cs.score|num }}</strong> / {{ cs.max|int }} · evidence coverage {{ cs.coverage|pct }}</div>
+    </div>
+    {% endfor %}
+  </div>
+  <div class="meta">
+    <div><span class="label">Evidence coverage</span> <strong>{{ card.coverage|pct }}</strong></div>
+    <div><span class="label">Confidence</span> <strong>{{ '%.2f'|format(card.confidence) }}</strong></div>
+  </div>
+</section>
+
+{% if card.review_reasons %}
+<section class="review">
+  <h3>Manual review required</h3>
+  <ul>{% for r in card.review_reasons %}<li>{{ r }}</li>{% endfor %}</ul>
+</section>
+{% endif %}
+
+<section class="next">
+  <h3>Next recommended manual research step</h3>
+  <p>{{ card.next_step }}</p>
+</section>
+
+<section>
+  <h2>Strongest verified findings</h2>
+  {% if card.top_findings %}
+  <ol class="top">
+    {% for r in card.top_findings %}
+    <li><strong>{{ r.signal.label }}</strong> <span class="pts">+{{ r.points|num }}</span>
+      <span class="muted small">({{ CATEGORY_LABELS[r.signal.category] }})</span>
+      <div>{{ evidence(r.finding) }}</div></li>
+    {% endfor %}
+  </ol>
+  {% else %}<p class="muted">No verified findings yet.</p>{% endif %}
+  {% if card.source_links %}
+  <h3>Source links</h3>
+  <ul class="links">{% for u in card.source_links %}<li><a href="{{ u }}" rel="noopener noreferrer" target="_blank">{{ u }}</a></li>{% endfor %}</ul>
+  {% endif %}
+</section>
+
+<section id="signals">
+  <h2>All signals</h2>
+  <p class="muted small">Unknown, stale, low-confidence and evidence-less findings score 0 and do not count toward coverage. See the <a href="{{ url_for('pf.rubric') }}">rubric</a> for how each signal is measured.</p>
+  <div class="table-wrap">
+  <table class="signals">
+    <thead><tr><th>Signal</th><th class="num">Points</th><th>State</th><th>Evidence</th></tr></thead>
+    <tbody>
+    {% for r in card.results %}
+      {% if loop.first or r.signal.category != card.results[loop.index0 - 1].signal.category %}
+      <tr class="cathead"><td colspan="4">{{ CATEGORY_LABELS[r.signal.category] }} ({{ CATEGORY_MAX[r.signal.category]|int }})</td></tr>
+      {% endif %}
+      <tr class="state-{{ r.state.value }}">
+        <td><strong>{{ r.signal.label }}</strong>{% if r.signal.group %}<div class="small muted">group: {{ r.signal.group }}</div>{% endif %}</td>
+        <td class="num">{{ r.points|num }} / {{ r.signal.max_points|num }}</td>
+        <td><span class="state">{{ r.state.value.replace('_', ' ') }}</span>
+          {% for n in r.notes %}<div class="small muted">{{ n }}</div>{% endfor %}</td>
+        <td>{% if r.state.value in ('counted', 'not_met') %}{{ evidence(r.finding) }}{% endif %}
+          {% if r.set_aside %}
+          <details><summary class="small">{{ r.set_aside|length }} other finding(s)</summary>
+            <ul class="small">
+            {% for f, why in r.set_aside %}
+              <li><em>{{ why }}</em> — {{ f.outcome.value }}, {{ evidence(f) }}
+                {% if f.source_type == 'manual' %}
+                <form class="inline" method="post" action="{{ url_for('pf.delete_finding', business_id=b.id, finding_id=f.id) }}">
+                  <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link">delete</button></form>
+                {% endif %}</li>
+            {% endfor %}
+            </ul>
+          </details>
+          {% endif %}
+          {% if r.finding and r.finding.source_type == 'manual' and r.state.value in ('counted', 'not_met') %}
+            <form class="inline" method="post" action="{{ url_for('pf.delete_finding', business_id=b.id, finding_id=r.finding.id) }}">
+              <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link small">delete manual finding</button></form>
+          {% endif %}
+          {% if r.state.value not in ('counted', 'not_met', 'superseded') %}<div class="small muted">Research: {{ r.signal.research_step }}</div>{% endif %}
+        </td>
+      </tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+<section class="grid2">
+  <div>
+    <h2>Record a manual finding</h2>
+    <form method="post" action="{{ url_for('pf.add_finding', business_id=b.id) }}" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Signal <select name="signal_key">{% for s in signals %}<option value="{{ s.key }}">{{ CATEGORY_LABELS[s.category] }} — {{ s.label }} ({{ s.max_points }})</option>{% endfor %}</select></label>
+      <label>Outcome <select name="outcome">
+        <option value="met">Met (condition true — earns points)</option>
+        <option value="not_met">Not met (checked, condition false)</option>
+        <option value="unknown">Unknown (could not determine)</option></select></label>
+      <label>Evidence type <select name="evidence_type">
+        <option value="observed">Observed fact</option>
+        <option value="inferred">Inference</option>
+        <option value="confirmed_failure">Confirmed failure (test run and failed)</option></select></label>
+      <label>Confidence (0–1) <input name="confidence" type="number" min="0" max="1" step="0.05" value="0.9"></label>
+      <label>Source URL <input name="source_url" type="url" placeholder="https://… where you saw it"></label>
+      <label>Observation <textarea name="observation" rows="2" placeholder="Exactly what you saw, e.g. 'Contact page has only a phone number, no form'"></textarea></label>
+      <label>Test name <input name="test_name" placeholder="required for confirmed failures, e.g. 'submitted contact form'"></label>
+      <label>Test result <input name="test_result" placeholder="e.g. 'form returned error 500'"></label>
+      <label>Observed on <input name="observed_on" type="date"></label>
+      <button>Save finding</button>
+    </form>
+  </div>
+  <div>
+    <h2>Outreach</h2>
+    <form method="post" action="{{ url_for('pf.update_outreach', business_id=b.id) }}" class="stack">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <label>Status <select name="status">{% for s in statuses %}<option value="{{ s }}" {{ 'selected' if p.outreach.status == s }}>{{ s.replace('_', ' ') }}</option>{% endfor %}</select></label>
+      <label>Last contact date <input type="date" name="last_contact_date" value="{{ p.outreach.last_contact_date or '' }}"></label>
+      <label>Response <textarea name="response" rows="2">{{ p.outreach.response or '' }}</textarea></label>
+      <label>Notes <textarea name="notes" rows="2">{{ p.outreach.notes or '' }}</textarea></label>
+      <button>Save outreach</button>
+    </form>
+    {% if not p.outreach.opted_out %}
+    <form method="post" action="{{ url_for('pf.opt_out', business_id=b.id) }}" onsubmit="return confirm('Mark as opted out? This cannot be undone from the app.')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+      <input name="reason" placeholder="Opt-out note (optional)">
+      <button class="danger">Mark opted out</button>
+    </form>
+    {% endif %}
+
+    <h2>Identity &amp; sources</h2>
+    <table class="kv">
+      {% for f in identity_fields %}
+      {% set prov = b.field_sources.get(f) %}
+      <tr><th>{{ f.replace('_', ' ') }}</th><td>{{ b[f] or '—' }}
+        {% if prov %}<div class="small muted">{{ sources[prov.source].label if prov.source in sources else prov.source }}
+          {% if prov.batch_id and prov.batch_id in batches %} · batch “{{ batches[prov.batch_id].source_name }}”{% endif %}
+          · {{ prov.at|dt }}{% if prov.expires_at %} · expires {{ prov.expires_at|dt }}{% endif %}
+          {% if prov.url %} · <a href="{{ prov.url }}" rel="noopener noreferrer" target="_blank">source</a>{% endif %}</div>{% endif %}</td></tr>
+      {% endfor %}
+      {% if b.google_place_id %}<tr><th>Google place ID</th><td><code>{{ b.google_place_id }}</code></td></tr>{% endif %}
+      {% if b.osm_id %}<tr><th>OpenStreetMap</th><td><a href="https://www.openstreetmap.org/{{ b.osm_id }}" target="_blank" rel="noopener noreferrer">{{ b.osm_id }}</a> <span class="small muted">© OpenStreetMap contributors</span></td></tr>{% endif %}
+    </table>
+    <details><summary>Edit identity</summary>
+      <form method="post" action="{{ url_for('pf.edit_identity', business_id=b.id) }}" class="stack">
+        <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+        {% for f in identity_fields %}<label>{{ f.replace('_', ' ') }} <input name="{{ f }}" value="{{ b[f] or '' }}"></label>{% endfor %}
+        <label>Where you verified it <input name="source_url" type="url" placeholder="https://…"></label>
+        <button>Save (recorded as manual research)</button>
+      </form>
+    </details>
+
+    {% if scans %}
+    <h2>Scan history</h2>
+    <ul class="small">{% for s in scans %}<li>{{ s.started_at|dt }} — <strong>{{ s.status }}</strong>: {{ s.detail }}</li>{% endfor %}</ul>
+    {% endif %}
+
+    <form method="post" action="{{ url_for('pf.delete_prospect', business_id=b.id) }}" onsubmit="return confirm('Delete this prospect and its findings?')">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="link danger small">Delete prospect</button>
+    </form>
+  </div>
+</section>
+{% endblock %}

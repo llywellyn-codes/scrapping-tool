@@ -1,0 +1,14 @@
+{% macro tier_badge(card) -%}
+  <span class="tier tier-{{ card.tier }}">{{ TIER_LABELS[card.tier] }}</span>
+  {%- if card.tier == 'review' %} <span class="muted small">provisional {{ card.provisional_tier }}</span>{% endif %}
+{%- endmacro %}
+
+{% macro evidence(f) -%}
+  {% if f %}
+    <span class="etype etype-{{ f.evidence_type.value }}">{{ f.evidence_type.value.replace('_', ' ') }}</span>
+    <span class="muted small">conf {{ '%.2f'|format(f.confidence) }} · {{ f.source_type }} · {{ f.observed_at|dt }}</span>
+    {% if f.observation %}<div>{{ f.observation }}</div>{% endif %}
+    {% if f.test_name %}<div class="small muted">Test <code>{{ f.test_name }}</code>: {{ f.test_result }}</div>{% endif %}
+    {% if f.source_url %}<div class="small"><a href="{{ f.source_url }}" rel="noopener noreferrer" target="_blank">{{ f.source_url }}</a></div>{% endif %}
+  {% endif %}
+{%- endmacro %}

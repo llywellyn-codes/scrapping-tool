@@ -1,0 +1,43 @@
+<h2>Google Places search</h2>
+{% if google_enabled %}
+<p class="small muted">Official Places API (New), Text Search Pro SKU. Results are shown live with Google attribution; importing stores the place ID{% if config.PF.google_places_cache_days %} and caches details for {{ config.PF.google_places_cache_days }} days{% else %} only (details are not written to disk; the website scan fills them in from the business's own site){% endif %}. Google content is never exported.</p>
+<form method="post" action="{{ url_for('pf.google_search') }}" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>Search <input name="query" value="{{ google_query or '' }}" placeholder="roofing contractor in Tulsa, OK" required></label>
+  <button>Search Google Places</button>
+</form>
+{% else %}
+<p class="small muted">Set <code>GOOGLE_PLACES_API_KEY</code> in <code>.env</code> to enable. See README → API costs.</p>
+{% endif %}
+{% if google_results is defined %}
+  <h3>Results for “{{ google_query }}”</h3>
+  {% if not google_results %}<p class="muted">No results.</p>{% else %}
+  <form method="post" action="{{ url_for('pf.google_import') }}" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="query" value="{{ google_query }}">
+    {% for r in google_results %}
+    <label class="check"><input type="checkbox" name="place" value="{{ r|tojson|forceescape }}" {{ 'checked' if r.business_status == 'OPERATIONAL' }}>
+      <span><strong>{{ r.name }}</strong> — {{ r.address }} <span class="muted small">({{ r.primary_type or 'type unknown' }}, {{ (r.business_status or 'status unknown')|lower }})</span>
+      {% if r.maps_uri %}<a class="small" href="{{ r.maps_uri }}" target="_blank" rel="noopener noreferrer">View on Google Maps</a>{% endif %}</span></label>
+    {% endfor %}
+    <p class="small muted">Results from Google Maps.</p>
+    <button>Import selected</button>
+  </form>
+  {% if google_next %}
+  <form method="post" action="{{ url_for('pf.google_search') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="query" value="{{ google_query }}"><input type="hidden" name="page_token" value="{{ google_next }}">
+    <button class="button secondary">More results</button>
+  </form>
+  {% endif %}
+  {% endif %}
+{% endif %}
+
+<h2>OpenStreetMap (free)</h2>
+<p class="small muted">Imports businesses tagged <code>craft=roofer</code> via the public Overpass API. Coverage is sparse in the US. Data © OpenStreetMap contributors, ODbL 1.0 — attribution is kept in exports.</p>
+<form method="post" action="{{ url_for('pf.osm_import') }}" class="stack">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <label>State (2 letters) <input name="state" maxlength="2" required placeholder="TX"></label>
+  <label>City (optional, matches addr:city) <input name="city" placeholder="Dallas"></label>
+  <button>Import from OpenStreetMap</button>
+</form>

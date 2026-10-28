@@ -1,0 +1,20 @@
+{% extends "base.html" %}
+{% block title %}Duplicates{% endblock %}
+{% block content %}
+<h1>Possible duplicates</h1>
+<p class="muted">Imports merge exact matches automatically (same place ID, website, phone, or name + location). Pairs below need a decision. Merging keeps the left record, fills its empty fields from the right one, moves findings and combines outreach history; an opt-out on either record carries over.</p>
+{% if not pairs %}<p class="empty">No possible duplicates found.</p>{% endif %}
+{% for a, b, reason in pairs %}
+<div class="dup">
+  <div><a href="{{ url_for('pf.prospect', business_id=a.id) }}">#{{ a.id }} {{ a.display_name }}</a><div class="small muted">{{ a.location }} · {{ a.phone or '' }} · {{ a.website or '' }}</div></div>
+  <div><a href="{{ url_for('pf.prospect', business_id=b.id) }}">#{{ b.id }} {{ b.display_name }}</a><div class="small muted">{{ b.location }} · {{ b.phone or '' }} · {{ b.website or '' }}</div></div>
+  <div class="small">{{ reason }}</div>
+  <form method="post" action="{{ url_for('pf.merge') }}">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <input type="hidden" name="keep_id" value="{{ a.id }}"><input type="hidden" name="drop_id" value="{{ b.id }}">
+    <button>Merge #{{ b.id }} into #{{ a.id }}</button>
+  </form>
+</div>
+{% endfor %}
+<p><a href="{{ url_for('pf.export_suppression') }}">Download suppression list (opted-out phones, domains, emails, IDs)</a></p>
+{% endblock %}

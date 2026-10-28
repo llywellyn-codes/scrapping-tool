@@ -1,0 +1,45 @@
+{% extends "base.html" %}
+{% block title %}Import{% endblock %}
+{% block content %}
+<h1>Find and import roofing businesses</h1>
+<div class="grid2">
+<section>
+  <h2>CSV file</h2>
+  <p class="small muted">Use lists you have the right to store: state contractor-license exports, your own research, or a purchased list whose licence allows it. Columns recognised: name / business_name, phone, email, website, address, city, state, zip, source_url (per-row record link). Non-US rows are rejected; duplicates are merged; opted-out businesses are skipped.</p>
+  <form method="post" enctype="multipart/form-data" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    <label>CSV file <input type="file" name="file" accept=".csv,text/csv" required></label>
+    <label>Data source name <input name="source_name" required placeholder="e.g. Florida DBPR licensee file, Oct 2026"></label>
+    <label>Source URL <input name="source_url" type="url" placeholder="Where the list came from"></label>
+    <label>What the provider's terms allow <textarea name="terms_note" rows="2" placeholder="e.g. Public record; redistribution allowed"></textarea></label>
+    <label class="check"><input type="checkbox" name="storage_permitted" value="1" required> The provider's terms allow me to store this data</label>
+    <label class="check"><input type="checkbox" name="export_permitted" value="1"> The terms also allow me to export it (otherwise these fields are left out of CSV exports)</label>
+    <button>Import CSV</button>
+  </form>
+  {% if report %}
+  <h3>Import result (batch #{{ report.batch_id }})</h3>
+  <table class="kv small">{% for r in report.rows %}<tr><th>row {{ r.row }}</th><td>{{ r.action }}{% if r.reason %} — {{ r.reason }}{% endif %}
+    {% if r.business_id %} <a href="{{ url_for('pf.prospect', business_id=r.business_id) }}">#{{ r.business_id }}</a>{% endif %}</td></tr>{% endfor %}</table>
+  {% endif %}
+</section>
+<section>
+  {% include "_search_sources.html" %}
+  <h2>Add one prospect manually</h2>
+  <form method="post" action="{{ url_for('pf.new_prospect') }}" class="stack">
+    <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+    {% for f in identity_fields %}<label>{{ f.replace('_', ' ') }} <input name="{{ f }}"></label>{% endfor %}
+    <label>Where you found it <input name="source_url" type="url" placeholder="https://…"></label>
+    <button>Add prospect</button>
+  </form>
+</section>
+</div>
+{% if batches %}
+<h2>Import history</h2>
+<div class="table-wrap"><table class="small">
+  <thead><tr><th>#</th><th>Source</th><th>When</th><th>Export allowed</th><th class="num">New</th><th class="num">Merged</th><th class="num">Skipped</th><th class="num">Rejected</th><th>Terms note</th></tr></thead>
+  {% for bt in batches %}<tr><td>{{ bt.id }}</td><td>{{ bt.source_name }} <span class="muted">({{ bt.source_type }})</span></td><td>{{ bt.imported_at|dt }}</td>
+    <td>{{ 'yes' if bt.export_permitted else 'no' }}</td><td class="num">{{ bt.rows_created }}</td><td class="num">{{ bt.rows_merged }}</td>
+    <td class="num">{{ bt.rows_suppressed }}</td><td class="num">{{ bt.rows_rejected }}</td><td>{{ bt.terms_note or '' }}</td></tr>{% endfor %}
+</table></div>
+{% endif %}
+{% endblock %}

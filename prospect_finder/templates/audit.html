@@ -1,0 +1,23 @@
+{% extends "base.html" %}
+{% block title %}Audit — {{ b.display_name }}{% endblock %}
+{% block content %}
+<p><a href="{{ url_for('pf.prospect', business_id=b.id) }}">← {{ b.display_name }}</a></p>
+<h1>Audit draft</h1>
+{% for w in audit.warnings %}<div class="flash error">{{ w }}</div>{% endfor %}
+<p class="small muted">Built from {{ audit.used|length }} verified finding(s) · {{ audit.generated_by }}. Every statement maps to a finding below; nothing else is added.</p>
+<pre class="audit">{{ audit.text }}</pre>
+{% if llm_enabled and audit.generated_by == 'template' %}
+<form method="post" action="{{ url_for('pf.audit_rewrite', business_id=b.id) }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button class="button secondary" title="Sends only the text above to the Claude API; the rewrite is rejected if it adds numbers or claims">Smooth wording with Claude</button>
+</form>
+{% endif %}
+<h2>Evidence used</h2>
+<ol>
+{% for r in audit.used %}
+  <li><strong>{{ r.signal.label }}</strong> — {{ r.finding.evidence_type.value.replace('_', ' ') }}, confidence {{ '%.2f'|format(r.finding.confidence) }}, {{ r.finding.observed_at|dt }}
+    <div>{{ r.finding.observation }}</div>
+    <div class="small"><a href="{{ r.finding.source_url }}" target="_blank" rel="noopener noreferrer">{{ r.finding.source_url }}</a></div></li>
+{% endfor %}
+</ol>
+{% endblock %}
