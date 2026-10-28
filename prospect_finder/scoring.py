@@ -297,6 +297,7 @@ def score_findings(
     now: datetime | None = None,
     opted_out: bool = False,
     has_website: bool | None = None,
+    website_check_failed: str | None = None,
     policy: ScoringPolicy = DEFAULT_POLICY,
 ) -> ScoreCard:
     """Score one business from its findings."""
@@ -372,7 +373,8 @@ def score_findings(
         results=ordered,
         top_findings=top,
         next_step=_next_step(tier, results, has_website,
-                             scanned=any(f.source_type == "website_scan" for f in findings)),
+                             scanned=any(f.source_type == "website_scan" for f in findings),
+                             check_failed=website_check_failed),
         source_links=links,
     )
 
@@ -400,7 +402,8 @@ def _review_reasons(results, categories, coverage, confidence, policy: ScoringPo
     return reasons
 
 
-def _next_step(tier: str, results: dict[str, SignalResult], has_website, scanned: bool = False) -> str:
+def _next_step(tier: str, results: dict[str, SignalResult], has_website, scanned: bool = False,
+               check_failed: str | None = None) -> str:
     if tier == "do_not_contact":
         return "Do not contact. Keep this business on the suppression list."
     if tier == "not_a_fit":
@@ -414,6 +417,9 @@ def _next_step(tier: str, results: dict[str, SignalResult], has_website, scanned
     for r in results.values():
         if r.conflict:
             return f"Resolve conflicting findings for '{r.signal.label}': {r.signal.research_step}"
+    if check_failed:
+        return (f"The last website check failed ({check_failed}). Retry it later; if it keeps failing, open the "
+                "site in a browser and record what you see as a manual finding.")
     website_signals = {"no_lead_form", "no_click_to_call", "missing_mobile_viewport", "roofing_core_service"}
     stale = by_state(SignalState.STALE)
     if stale:

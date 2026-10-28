@@ -1,18 +1,26 @@
 """A deliberately polite HTTP fetcher for public business websites.
 
-- Obeys robots.txt (RFC 9309): unreachable robots.txt (5xx) means "do not crawl".
+- Obeys robots.txt (RFC 9309). If robots.txt keeps returning server errors the
+  site is not crawled; that counts as a temporary failure, not as a finding.
 - One request at a time per host, at least ``min_delay`` seconds apart (or the
-  site's Crawl-delay if longer).
-- Never bypasses access controls: HTTP 401/403/429, login redirects and
-  CAPTCHA / bot-challenge pages stop the scan and are reported as "blocked".
+  site's Crawl-delay if longer). The spacing is shared by every fetcher that uses
+  the same ``HostThrottle``, so parallel batch workers stay polite too.
+- Retries temporary failures (timeouts, connection errors, HTTP 5xx and 429)
+  a limited number of times with exponential backoff, honouring Retry-After up
+  to a cap. Permanent failures (TLS errors, 404) are not retried.
+- Never bypasses access controls: HTTP 401/403, login redirects and CAPTCHA /
+  bot-challenge pages stop the scan and are reported as "blocked".
 - Does not run JavaScript, submit forms, or send cookies between sites.
 """
 
 from __future__ import annotations
 
+import random
 import re
+import threading
 import time
 from dataclasses import dataclass, field
+from email.utils import parsedate_to_datetime
 from urllib import robotparser
 from urllib.parse import urljoin, urlparse
 
@@ -36,13 +44,20 @@ class FetchResult:
     text: str | None = None
     content_type: str | None = None
     error: str | None = None
-    error_kind: str | None = None   # dns | connect | timeout | tls | too_many_redirects | not_html | other
+    error_kind: str | None = None   # see TEMPORARY_ERRORS / PERMANENT_ERRORS
     blocked: str | None = None      # why we stopped without reading the page
     redirects: list[str] = field(default_factory=list)
+    attempts: int = 0
+    retry_after: str | None = None
 
     @property
     def ok(self) -> bool:
         return self.blocked is None and self.status is not None and 200 <= self.status < 300 and self.text is not None
+
+    @property
+    def temporary(self) -> bool:
+        """True when the failure says nothing about the website itself and is worth retrying later."""
+        return self.error_kind in TEMPORARY_ERRORS
 
     def describe(self) -> str:
         if self.blocked:
@@ -50,6 +65,13 @@ class FetchResult:
         if self.error:
             return self.error
         return f"HTTP {self.status}"
+
+
+# Failures caused by the network, the server being busy, or our own limits.
+TEMPORARY_ERRORS = {"timeout", "connect", "dns", "server_error", "rate_limited", "robots_unavailable", "deadline"}
+# Failures that repeat on every attempt.
+PERMANENT_ERRORS = {"tls", "client_error", "too_many_redirects", "not_html", "other"}
+RETRY_STATUSES = {500, 502, 503, 504}
 
 
 def _classify(exc: Exception) -> tuple[str, str]:
@@ -92,10 +114,43 @@ def challenge_reason(html: str) -> str | None:
     return None
 
 
+def _retry_after_seconds(value: str | None) -> float | None:
+    if not value:
+        return None
+    value = value.strip()
+    if value.isdigit():
+        return float(value)
+    try:
+        return max(0.0, parsedate_to_datetime(value).timestamp() - time.time())
+    except (TypeError, ValueError):
+        return None
+
+
+class HostThrottle:
+    """Thread-safe per-host request spacing, shared by all fetchers in a batch."""
+
+    def __init__(self, sleep=time.sleep, clock=time.monotonic):
+        self.sleep = sleep
+        self.clock = clock
+        self._lock = threading.Lock()
+        self._next_allowed: dict[str, float] = {}
+        self.rate_limited: set[str] = set()
+
+    def wait(self, host: str, delay: float) -> None:
+        """Block until ``host`` may be contacted, then reserve the next slot ``delay`` seconds later."""
+        with self._lock:
+            now = self.clock()
+            start = max(now, self._next_allowed.get(host, now))
+            self._next_allowed[host] = start + delay
+        if start > now:
+            self.sleep(start - now)
+
+
 class PoliteFetcher:
     def __init__(self, user_agent: str, *, min_delay: float = 3.0, timeout: float = 15.0,
                  max_bytes: int = 2_000_000, max_redirects: int = 5, session: requests.Session | None = None,
-                 sleep=time.sleep, clock=time.monotonic):
+                 sleep=time.sleep, clock=time.monotonic, max_retries: int = 2, backoff_base: float = 2.0,
+                 max_retry_after: float = 30.0, throttle: HostThrottle | None = None, jitter=None):
         self.user_agent = user_agent
         self.min_delay = min_delay
         self.timeout = timeout
@@ -104,9 +159,17 @@ class PoliteFetcher:
         self.session = session or requests.Session()
         self.sleep = sleep
         self.clock = clock
-        self._last_request: dict[str, float] = {}
+        self.max_retries = max_retries
+        self.backoff_base = backoff_base
+        self.max_retry_after = max_retry_after
+        self.throttle = throttle or HostThrottle(sleep=sleep, clock=clock)
+        self.jitter = jitter or (lambda: random.uniform(0, 0.5))
+        self._deadline: float | None = None
         self._robots: dict[str, tuple[robotparser.RobotFileParser | None, str | None, FetchResult | None]] = {}
-        self._rate_limited: set[str] = set()
+
+    def start_site(self, time_limit: float | None) -> None:
+        """Begin a new site: requests stop with a temporary 'deadline' error after ``time_limit`` seconds."""
+        self._deadline = self.clock() + time_limit if time_limit else None
 
     # ------------------------------------------------------------ internals
 
@@ -116,20 +179,41 @@ class PoliteFetcher:
         return f"{p.scheme}://{p.netloc}"
 
     def _wait_turn(self, url: str, crawl_delay: float | None = None) -> None:
-        host = urlparse(url).netloc
-        delay = max(self.min_delay, crawl_delay or 0)
-        last = self._last_request.get(host)
-        if last is not None:
-            remaining = delay - (self.clock() - last)
-            if remaining > 0:
-                self.sleep(remaining)
-        self._last_request[host] = self.clock()
+        self.throttle.wait(urlparse(url).netloc, max(self.min_delay, crawl_delay or 0))
+
+    def _past_deadline(self) -> bool:
+        return self._deadline is not None and self.clock() >= self._deadline
+
+    def _get_with_retries(self, url: str, accept: str, crawl_delay: float | None = None) -> FetchResult:
+        """One logical request: retries timeouts, connection errors, 5xx and 429 with backoff."""
+        attempts = 0
+        while True:
+            if self._past_deadline():
+                return FetchResult(url=url, error="per-site time limit reached", error_kind="deadline",
+                                   attempts=attempts)
+            self._wait_turn(url, crawl_delay)
+            res = self._raw_get(url, accept)
+            attempts += 1
+            res.attempts = attempts
+            retryable = res.error_kind in ("timeout", "connect") or res.status == 429 or (
+                res.error_kind == "dns" and attempts == 1) or (
+                res.status in RETRY_STATUSES and not (res.text and challenge_reason(res.text)))
+            if not retryable or attempts > self.max_retries:
+                return res
+            wait = self.backoff_base * 2 ** (attempts - 1) + self.jitter()
+            if res.status == 429:
+                asked = _retry_after_seconds(res.retry_after)
+                if asked is not None and asked > self.max_retry_after:
+                    return res  # the site wants a longer pause than we are willing to hold a worker for
+                wait = max(wait, asked or 0)
+            self.sleep(wait)
 
     def _raw_get(self, url: str, accept: str) -> FetchResult:
         result = FetchResult(url=url)
         try:
             resp = self.session.get(url, headers={"User-Agent": self.user_agent, "Accept": accept},
-                                    timeout=self.timeout, allow_redirects=False, stream=True)
+                                    timeout=(min(5.0, self.timeout), self.timeout), allow_redirects=False,
+                                    stream=True)
         except requests.exceptions.RequestException as exc:
             result.error_kind, result.error = _classify(exc)
             return result
@@ -137,6 +221,7 @@ class PoliteFetcher:
             result.status = resp.status_code
             result.final_url = url
             result.content_type = resp.headers.get("Content-Type", "")
+            result.retry_after = resp.headers.get("Retry-After")
             if 300 <= resp.status_code < 400:
                 result.redirects = [urljoin(url, resp.headers.get("Location", ""))]
                 return result
@@ -155,24 +240,30 @@ class PoliteFetcher:
     def _robots_for(self, url: str):
         origin = self._origin(url)
         if origin not in self._robots:
-            self._wait_turn(origin)
-            res = self._raw_get(origin + "/robots.txt", "text/plain")
+            res = self._get_with_retries(origin + "/robots.txt", "text/plain")
             hops = 0
             while res.redirects and hops < self.max_redirects and res.error is None:
                 target = res.redirects[0]
                 hops += 1
-                self._wait_turn(target)
-                res = self._raw_get(target, "text/plain")
+                res = self._get_with_retries(target, "text/plain")
             parser, problem = None, None
             if res.error:
                 problem = "unreachable"
-            elif res.status is not None and res.status >= 500:
-                problem = f"robots.txt returned HTTP {res.status}; RFC 9309 treats this as 'do not crawl'"
+            elif res.status is not None and (res.status >= 500 or res.status == 429):
+                # RFC 9309: an unavailable robots.txt means "do not crawl for now".
+                res.error_kind = "rate_limited" if res.status == 429 else "robots_unavailable"
+                if res.status == 429:
+                    self.throttle.rate_limited.add(urlparse(origin).netloc)
+                res.error = f"robots.txt returned HTTP {res.status}; not crawling until it is available"
+                problem = "unreachable"
             elif res.status == 200 and res.text is not None:
                 parser = robotparser.RobotFileParser()
                 parser.parse(res.text.splitlines())
             # Any other 4xx: no robots.txt, crawling allowed.
-            self._robots[origin] = (parser, problem, res)
+            if not (problem and res.temporary and res.error_kind != "robots_unavailable"):
+                self._robots[origin] = (parser, problem, res)
+            else:
+                return parser, problem, res  # network trouble: try robots.txt again on the next request
         return self._robots[origin]
 
     def robots_check(self, url: str) -> tuple[bool, str | None, FetchResult | None, float | None]:
@@ -195,18 +286,18 @@ class PoliteFetcher:
         current = url
         for _ in range(self.max_redirects + 1):
             host = urlparse(current).netloc
-            if host in self._rate_limited:
-                return FetchResult(url=url, final_url=current, blocked="site asked us to slow down (HTTP 429)",
-                                   redirects=redirects)
+            if host in self.throttle.rate_limited:
+                return FetchResult(url=url, final_url=current, error="site asked us to slow down (HTTP 429)",
+                                   error_kind="rate_limited", redirects=redirects)
             allowed, reason, robots_res, crawl_delay = self.robots_check(current)
             if not allowed and reason is None and robots_res is not None:
-                # robots.txt itself was unreachable: the site cannot be reached at all.
+                # robots.txt itself could not be read: nothing on this site may be fetched right now.
                 return FetchResult(url=url, final_url=current, error=robots_res.error,
-                                   error_kind=robots_res.error_kind, redirects=redirects)
+                                   error_kind=robots_res.error_kind, redirects=redirects,
+                                   attempts=robots_res.attempts)
             if not allowed:
                 return FetchResult(url=url, final_url=current, blocked=reason, redirects=redirects)
-            self._wait_turn(current, crawl_delay)
-            res = self._raw_get(current, "text/html,application/xhtml+xml")
+            res = self._get_with_retries(current, "text/html,application/xhtml+xml", crawl_delay)
             res.url = url
             if res.redirects and res.error is None:
                 target = res.redirects[0]
@@ -225,12 +316,15 @@ class PoliteFetcher:
             elif res.status == 403:
                 res.blocked, res.text = "access forbidden (HTTP 403)", None
             elif res.status == 429:
-                self._rate_limited.add(host)
-                res.blocked, res.text = "site asked us to slow down (HTTP 429)", None
-            elif res.text is not None and (res.status == 503 or 200 <= res.status < 300):
-                challenge = challenge_reason(res.text)
-                if challenge:
-                    res.blocked, res.text = challenge, None
+                self.throttle.rate_limited.add(host)
+                res.error, res.error_kind, res.text = "site asked us to slow down (HTTP 429)", "rate_limited", None
+            elif res.text is not None and (res.status == 503 or 200 <= res.status < 300) \
+                    and challenge_reason(res.text):
+                res.blocked, res.text = challenge_reason(res.text), None
+            elif res.status >= 500:
+                res.error, res.error_kind, res.text = f"server error (HTTP {res.status})", "server_error", None
+            elif res.status >= 400:
+                res.error, res.error_kind, res.text = f"HTTP {res.status}", "client_error", None
             if res.text is not None and res.status and 200 <= res.status < 300:
                 ctype = (res.content_type or "").lower()
                 if ctype and "html" not in ctype:

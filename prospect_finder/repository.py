@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import logging
 import sqlite3
 from dataclasses import dataclass
 from datetime import datetime
@@ -23,17 +24,93 @@ class EvidenceError(ValueError):
     """A finding was rejected because its evidence is incomplete."""
 
 
+SCHEMA_VERSION = 2
+log = logging.getLogger(__name__)
+
+
 def connect(path: str) -> sqlite3.Connection:
-    conn = sqlite3.connect(path, detect_types=0, check_same_thread=False)
+    # Batch workers write from their own connections; wait for locks instead of failing.
+    conn = sqlite3.connect(path, detect_types=0, check_same_thread=False, timeout=30)
     conn.row_factory = sqlite3.Row
     conn.execute("PRAGMA foreign_keys = ON")
     return conn
 
 
+def _db_file(conn: sqlite3.Connection) -> str:
+    row = conn.execute("PRAGMA database_list").fetchone()
+    return row[2] if row else ""
+
+
+def backup_db(conn: sqlite3.Connection, label: str) -> str | None:
+    """Copy the database next to itself before a migration; returns the backup path."""
+    path = _db_file(conn)
+    if not path:
+        return None
+    target = f"{path}.backup-{label}-{datetime.now():%Y%m%d-%H%M%S}"
+    dest = sqlite3.connect(target)
+    try:
+        conn.backup(dest)
+    finally:
+        dest.close()
+    return target
+
+
 def init_db(conn: sqlite3.Connection) -> None:
+    """Create tables and apply migrations. Existing rows are kept; the file is backed up first."""
+    version = conn.execute("PRAGMA user_version").fetchone()[0]
+    existing = conn.execute("SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'businesses'").fetchone()
+    if existing and version < SCHEMA_VERSION:
+        path = backup_db(conn, f"v{version}")
+        if path:
+            log.warning("Database backed up to %s before migrating to schema version %s", path, SCHEMA_VERSION)
     schema = resources.files("prospect_finder").joinpath("schema.sql").read_text()
     conn.executescript(schema)
+    if _db_file(conn):
+        conn.execute("PRAGMA journal_mode = WAL")  # lets the UI read while batch workers write
+    if version < 2:
+        _migrate_to_v2(conn)
+    conn.execute(f"PRAGMA user_version = {SCHEMA_VERSION}")
     conn.commit()
+
+
+def _migrate_to_v2(conn: sqlite3.Connection) -> None:
+    """Add per-prospect website check status and stop counting failed requests as evidence.
+
+    - website_checks is filled from the latest scan_log entry of each prospect, so prospects that
+      were already checked are recognised and not re-checked by bulk runs.
+    - Earlier versions recorded "No working website" (and "No working HTTPS" after a timeout) when
+      a request failed. Those automated findings are turned into "unknown" findings that keep the
+      original text, because a failed request is not evidence of a bad website.
+    """
+    conn.execute("""
+        INSERT OR IGNORE INTO website_checks
+            (business_id, status, checked_at, last_attempt_at, consecutive_failures, detail)
+        SELECT s.business_id,
+               CASE s.status WHEN 'ok' THEN 'ok' WHEN 'blocked' THEN 'blocked'
+                             WHEN 'no_website' THEN 'no_website' ELSE 'failed' END,
+               (SELECT MAX(COALESCE(x.finished_at, x.started_at)) FROM scan_log x
+                 WHERE x.business_id = s.business_id AND x.status IN ('ok', 'blocked')),
+               COALESCE(s.finished_at, s.started_at),
+               CASE WHEN s.status IN ('ok', 'blocked', 'no_website') THEN 0 ELSE 1 END,
+               s.detail
+          FROM scan_log s
+         WHERE s.id = (SELECT MAX(id) FROM scan_log WHERE business_id = s.business_id)
+    """)
+    note = ("Not counted: an automated request failure is not evidence of a bad website "
+            "(converted from an earlier automated result). Original: ")
+    cur = conn.execute("""
+        UPDATE findings
+           SET outcome = 'unknown', evidence_type = 'unknown', confidence = 0,
+               observation = ? || COALESCE(observation, '')
+         WHERE source_type = 'website_scan' AND outcome = 'met'
+           AND (signal_key = 'no_working_website'
+                OR (signal_key = 'no_https' AND evidence_type = 'confirmed_failure'
+                    AND COALESCE(test_result, '') NOT LIKE '%TLS%'
+                    AND COALESCE(test_result, '') NOT LIKE '%SSL%'
+                    AND COALESCE(test_result, '') NOT LIKE '%certificate%'))
+    """, (note,))
+    if cur.rowcount:
+        log.warning("Converted %s automated request-failure finding(s) to 'unknown'", cur.rowcount)
 
 
 @dataclass
@@ -422,6 +499,47 @@ class Repository:
     def scan_history(self, business_id: int) -> list[dict]:
         return [dict(r) for r in self.conn.execute(
             "SELECT * FROM scan_log WHERE business_id = ? ORDER BY id DESC LIMIT 10", (business_id,))]
+
+    def record_website_check(self, business_id: int, status: str, at: datetime, detail: str = "") -> None:
+        """Save the outcome of one website check (ok, blocked, failed or no_website)."""
+        when = format_ts(at)
+        if status in ("ok", "blocked"):
+            self.conn.execute(
+                """INSERT INTO website_checks (business_id, status, checked_at, last_attempt_at,
+                       consecutive_failures, detail) VALUES (?, ?, ?, ?, 0, ?)
+                   ON CONFLICT(business_id) DO UPDATE SET status = excluded.status, checked_at = excluded.checked_at,
+                       last_attempt_at = excluded.last_attempt_at, consecutive_failures = 0,
+                       detail = excluded.detail""", (business_id, status, when, when, detail))
+        elif status == "failed":
+            self.conn.execute(
+                """INSERT INTO website_checks (business_id, status, last_attempt_at, consecutive_failures, detail)
+                   VALUES (?, 'failed', ?, 1, ?)
+                   ON CONFLICT(business_id) DO UPDATE SET status = 'failed', last_attempt_at = excluded.last_attempt_at,
+                       consecutive_failures = website_checks.consecutive_failures + 1,
+                       detail = excluded.detail""", (business_id, when, detail))
+        elif status == "no_website":
+            self.conn.execute(
+                """INSERT INTO website_checks (business_id, status, last_attempt_at, consecutive_failures, detail)
+                   VALUES (?, 'no_website', ?, 0, ?)
+                   ON CONFLICT(business_id) DO UPDATE SET status = 'no_website',
+                       last_attempt_at = excluded.last_attempt_at, consecutive_failures = 0,
+                       detail = excluded.detail""", (business_id, when, detail))
+        else:
+            raise ValueError(f"unknown website check status {status}")
+        self.conn.commit()
+
+    def _row_to_check(self, row: sqlite3.Row) -> dict:
+        check = dict(row)
+        check["checked_at"] = parse_ts(check["checked_at"])
+        check["last_attempt_at"] = parse_ts(check["last_attempt_at"])
+        return check
+
+    def website_check(self, business_id: int) -> dict | None:
+        row = self.conn.execute("SELECT * FROM website_checks WHERE business_id = ?", (business_id,)).fetchone()
+        return self._row_to_check(row) if row else None
+
+    def all_website_checks(self) -> dict[int, dict]:
+        return {r["business_id"]: self._row_to_check(r) for r in self.conn.execute("SELECT * FROM website_checks")}
 
     def touch_checked(self, b: Business, when: datetime | None = None) -> None:
         b.last_checked_at = when or utcnow()

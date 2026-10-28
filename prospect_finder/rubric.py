@@ -135,8 +135,9 @@ SIGNALS: tuple[Signal, ...] = (
     # ---------------- Marketing opportunities (50) ----------------
     Signal(
         "no_working_website", MARKETING_OPPORTUNITY, "No working website", 30,
-        "Website failed to load on two attempts (DNS, connection, TLS, 404 or 5xx), or a manual "
-        "search confirmed no website exists. A missing URL alone is 'unknown'.",
+        "A manual check confirmed the website is missing or broken (opened in a browser, or a search "
+        "found no site). Automated request failures are recorded as failed checks, never as evidence; "
+        "a missing URL alone is 'unknown'.",
         "Search for the business name + city to find a website, then re-run the scan.",
         supersedes=_WEBSITE_DEPENDENT,
         audit_why="Homeowners who look you up online have nowhere to learn about your work or request a quote.",

@@ -88,3 +88,45 @@ CREATE TABLE IF NOT EXISTS scan_log (
     status TEXT NOT NULL,
     detail TEXT
 );
+
+-- Latest website check per prospect. "checked_at" is the last completed check (ok or
+-- blocked); a later failed attempt does not erase it.
+CREATE TABLE IF NOT EXISTS website_checks (
+    business_id INTEGER PRIMARY KEY REFERENCES businesses(id) ON DELETE CASCADE,
+    status TEXT NOT NULL CHECK (status IN ('ok', 'blocked', 'failed', 'no_website')),
+    checked_at TEXT,
+    last_attempt_at TEXT NOT NULL,
+    consecutive_failures INTEGER NOT NULL DEFAULT 0,
+    detail TEXT
+);
+
+-- Bulk website check runs. Each item is saved as soon as it finishes.
+CREATE TABLE IF NOT EXISTS check_jobs (
+    id INTEGER PRIMARY KEY,
+    mode TEXT NOT NULL CHECK (mode IN ('unevaluated', 'selected')),
+    status TEXT NOT NULL CHECK (status IN ('running', 'stopping', 'stopped', 'interrupted', 'completed')),
+    batch_size INTEGER NOT NULL,
+    force INTEGER NOT NULL DEFAULT 0,
+    created_at TEXT NOT NULL,
+    heartbeat_at TEXT,
+    finished_at TEXT,
+    remaining_after INTEGER,
+    extra TEXT NOT NULL DEFAULT '{}'      -- JSON: prospects left out and why, selections over the batch size
+);
+-- At most one running batch at a time.
+CREATE UNIQUE INDEX IF NOT EXISTS idx_one_active_check_job
+    ON check_jobs ((status IN ('running', 'stopping'))) WHERE status IN ('running', 'stopping');
+
+CREATE TABLE IF NOT EXISTS check_job_items (
+    id INTEGER PRIMARY KEY,
+    job_id INTEGER NOT NULL REFERENCES check_jobs(id) ON DELETE CASCADE,
+    business_id INTEGER NOT NULL REFERENCES businesses(id) ON DELETE CASCADE,
+    state TEXT NOT NULL CHECK (state IN ('queued', 'processing', 'completed', 'failed', 'skipped')),
+    attempts INTEGER NOT NULL DEFAULT 0,
+    result TEXT,
+    detail TEXT,
+    started_at TEXT,
+    finished_at TEXT,
+    UNIQUE (job_id, business_id)
+);
+CREATE INDEX IF NOT EXISTS idx_check_job_items_state ON check_job_items(job_id, state);

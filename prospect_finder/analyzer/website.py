@@ -129,12 +129,14 @@ class Page:
 
 @dataclass
 class ScanResult:
-    status: str  # ok | unreachable | blocked | no_website
+    # ok | blocked (access restricted, not retried) | failed (request failed; no evidence) | no_website
+    status: str
     detail: str
     findings: list[Finding] = field(default_factory=list)
     identity: dict[str, str] = field(default_factory=dict)
     pages: list[str] = field(default_factory=list)
     final_url: str | None = None
+    temporary: bool = False  # for "failed": worth retrying later
 
 
 def _snippet(text: str, match: re.Match, width: int = 70) -> str:
@@ -185,22 +187,12 @@ def analyze_website(url: str | None, fetcher: PoliteFetcher, now: datetime | Non
         if r_http.ok:
             home_res = r_http
     if home_res is None:
-        # Second attempt (the fetcher enforces the per-host delay between tries).
-        retry = fetcher.get(https_url)
-        attempts.append(f"retry {https_url} -> {retry.describe()}")
-        if retry.ok:
-            home_res, r_https = retry, retry
-        elif retry.blocked:
-            return _blocked(b, retry, https_url)
-    if home_res is None:
-        detail = "; ".join(attempts)
-        b.add("no_working_website", Outcome.MET, EvidenceType.CONFIRMED_FAILURE, 0.8, https_url,
-              "Website did not load on two attempts. Temporary outages are possible; re-check before outreach.",
-              "homepage load (https, http, retry)", detail)
-        for key in WEBSITE_SIGNALS:
-            if key != "no_working_website":
-                b.unknown(key, https_url, "Website did not load, so this could not be checked.")
-        return ScanResult("unreachable", detail, b.findings)
+        # The fetcher has already retried temporary errors. A failed request is not evidence that the
+        # business has a bad website, so nothing is recorded as a finding; the check is marked failed.
+        tries = (r_https.attempts or 1) + (r_http.attempts or 1 if r_http else 0)
+        detail = "; ".join(attempts) + f" ({tries} request(s) in total)"
+        temporary = r_https.temporary or bool(r_http and r_http.temporary)
+        return ScanResult("failed", detail, temporary=temporary)
 
     home_url = home_res.final_url or home_res.url
     home = Page.parse(home_url, home_res.text, "home")
@@ -210,13 +202,16 @@ def analyze_website(url: str | None, fetcher: PoliteFetcher, now: datetime | Non
 
     pages = [home]
     notes = []
+    unread_kinds: set[str] = set()
     for target, kind in _extra_pages(home)[: max(0, max_pages - 1)]:
         res = fetcher.get(target)
         if res.ok and res.final_url and domain_key(res.final_url) == domain_key(home_url):
             pages.append(Page.parse(res.final_url, res.text, kind))
         else:
             notes.append(f"{target}: {res.describe()}")
-    _analyze_pages(b, home, pages, now)
+            if not res.ok and res.final_url and domain_key(res.final_url) == domain_key(home_url):
+                unread_kinds.add(kind)
+    _analyze_pages(b, home, pages, now, unread_kinds)
     identity = extract_identity(home, pages)
     detail = f"checked {len(pages)} page(s): " + ", ".join(p.url for p in pages)
     if notes:
@@ -244,10 +239,14 @@ def _check_https(b: _Builder, r_https, r_http, https_url, http_url, home_url):
     elif r_http is not None and r_http.ok and (r_http.final_url or "").startswith("https://"):
         b.unknown("no_https", https_url, "HTTPS failed once but the http:// version redirected to HTTPS; re-check.",
                   "https load")
-    elif r_http is not None and r_http.ok:
+    elif r_http is not None and r_http.ok and r_https is not None and r_https.error_kind == "tls":
         b.add("no_https", Outcome.MET, EvidenceType.CONFIRMED_FAILURE, 0.85, https_url,
-              f"The https:// version failed while the http:// version loaded ({home_url}).",
-              "https load", f"https: {r_https.describe() if r_https else 'not tried'}; http: HTTP {r_http.status}")
+              f"The https:// version failed with a certificate/TLS error while the http:// version loaded "
+              f"({home_url}).", "https load", f"https: {r_https.describe()}; http: HTTP {r_http.status}")
+    elif r_http is not None and r_http.ok:
+        # A timeout or connection error on https says nothing certain about the certificate.
+        b.unknown("no_https", https_url, f"The https:// request failed ({r_https.describe() if r_https else 'not tried'}) "
+                  "but that can be temporary; re-check before treating HTTPS as broken.", "https load")
 
 
 def _extra_pages(home: Page) -> list[tuple[str, str]]:
@@ -295,7 +294,8 @@ def _search_pages(pages: list[Page], pattern: re.Pattern):
     return None, None
 
 
-def _analyze_pages(b: _Builder, home: Page, pages: list[Page], now: datetime) -> None:
+def _analyze_pages(b: _Builder, home: Page, pages: list[Page], now: datetime,
+                   unread_kinds: set[str] | None = None) -> None:
     thin = len(home.text) < THIN_TEXT_CHARS
     checked = ", ".join(p.url for p in pages)
     thin_note = (f"Homepage has only {len(home.text)} characters of server-rendered text; content is probably "
@@ -391,6 +391,9 @@ def _analyze_pages(b: _Builder, home: Page, pages: list[Page], now: datetime) ->
         p, desc_ = form_hit
         b.add("no_lead_form", Outcome.NOT_MET, EvidenceType.OBSERVED, 0.9, p.url, desc_, "lead form search",
               "form found")
+    elif "contact" in (unread_kinds or set()):
+        b.unknown("no_lead_form", home.url, "The contact page link exists but the page could not be loaded, so "
+                  "the absence of a form is not counted.", "lead form search")
     elif has_contact:
         absent("no_lead_form", Outcome.MET, EvidenceType.OBSERVED, 0.8,
                f"No form with name/email/phone fields and no known form embed on: {checked}.", "lead form search",

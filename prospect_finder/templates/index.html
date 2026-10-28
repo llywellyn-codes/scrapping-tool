@@ -1,5 +1,5 @@
 {% extends "base.html" %}
-{% from "_macros.html" import tier_badge with context %}
+{% from "_macros.html" import tier_badge, check_badge with context %}
 {% block title %}Prospects{% endblock %}
 {% block content %}
 <h1>Prospects <span class="muted">({{ prospects|length }})</span></h1>
@@ -13,6 +13,11 @@
     <option value="">All outreach statuses</option>
     {% for s in statuses %}<option value="{{ s }}" {{ 'selected' if filters.status == s }}>{{ s.replace('_', ' ') }}</option>{% endfor %}
   </select>
+  <select name="check" aria-label="Website check">
+    <option value="">All website checks</option>
+    {% for key, label in [('unevaluated', 'Unevaluated'), ('evaluated', 'Evaluated'), ('stale', 'Stale'), ('failed', 'Failed')] %}
+    <option value="{{ key }}" {{ 'selected' if filters.check == key }}>{{ label }}</option>{% endfor %}
+  </select>
   <select name="sort">
     <option value="score" {{ 'selected' if filters.sort == 'score' }}>Sort by score</option>
     <option value="coverage" {{ 'selected' if filters.sort == 'coverage' }}>Sort by evidence coverage</option>
@@ -20,19 +25,36 @@
   </select>
   <button>Filter</button>
 </form>
+
+<form id="bulk" class="bulkbar" method="post" action="{{ url_for('pf.start_checks') }}">
+  <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
+  <button name="mode" value="unevaluated" {{ 'disabled' if running_batch or not eligible_count }}
+          title="Checks prospects never checked, with stale checks, or whose failed check is due a retry">
+    Check unevaluated websites ({{ eligible_count }} due)</button>
+  <button name="mode" value="selected" class="secondary" {{ 'disabled' if running_batch }}>Check selected</button>
+  <label>Batch size <input type="number" name="batch_size" value="{{ batch_size }}" min="1" max="500"></label>
+  <label class="check"><input type="checkbox" name="force" value="1"> Re-check selected even if checked recently</label>
+  {% if left_out %}
+  <span class="small muted">Not due: {% for reason, n in left_out.items() %}{{ n }} {{ {'no_website': 'without a website', 'opted_out': 'opted out', 'failed_recently': 'failed recently', 'failed_too_often': 'failed repeatedly'}.get(reason, reason) }}{{ ', ' if not loop.last }}{% endfor %}</span>
+  {% endif %}
+  {% if latest_batch and not running_batch %}<a class="small" href="{{ url_for('pf.check_job', job_id=latest_batch.id) }}">Last batch #{{ latest_batch.id }} ({{ latest_batch.status }})</a>{% endif %}
+</form>
+
 {% if not prospects %}
-  <p class="empty">No prospects yet. <a href="{{ url_for('pf.import_page') }}">Import a CSV or search a data source</a>.</p>
+  <p class="empty">No prospects{% if filters.check or filters.tier or filters.status or filters.q %} match these filters{% else %} yet. <a href="{{ url_for('pf.import_page') }}">Import a CSV or search a data source</a>{% endif %}.</p>
 {% else %}
 <div class="table-wrap">
 <table class="prospects">
   <thead><tr>
+    <th><input type="checkbox" id="select-all" aria-label="Select all"></th>
     <th>Prospect</th><th class="num">Score</th><th class="num" title="Business fit / Marketing opportunities / Commercial readiness">Fit · Opp · Ready</th>
-    <th class="num">Coverage</th><th class="num">Confidence</th><th>Tier</th><th>Outreach</th><th>Last checked</th>
+    <th class="num">Coverage</th><th class="num">Confidence</th><th>Tier</th><th>Website check</th><th>Outreach</th>
   </tr></thead>
   <tbody>
   {% for p in prospects %}
     {% set c = p.card %}
     <tr class="{{ 'dnc' if p.outreach.opted_out }}">
+      <td><input type="checkbox" name="ids" value="{{ p.business.id }}" form="bulk" aria-label="Select {{ p.business.display_name }}"></td>
       <td><a href="{{ url_for('pf.prospect', business_id=p.business.id) }}">{{ p.business.display_name }}</a>
         <div class="muted small">{{ p.business.location or '—' }}</div></td>
       <td class="num"><strong>{{ c.total|num }}</strong><span class="muted small"> / up to {{ c.upper_bound|num }}</span></td>
@@ -40,13 +62,19 @@
       <td class="num">{{ c.coverage|pct }}</td>
       <td class="num">{{ '%.2f'|format(c.confidence) }}</td>
       <td>{{ tier_badge(c) }}</td>
+      <td>{% if in_batch.get(p.business.id) %}<span class="cstate cstate-processing">{{ 'Checking now' if in_batch[p.business.id] == 'processing' else 'Queued' }}</span>
+          {% else %}{{ check_badge(p) }}{% endif %}</td>
       <td>{{ 'opted out' if p.outreach.opted_out else p.outreach.status.replace('_', ' ') }}
         {% if p.outreach.last_contact_date %}<div class="muted small">{{ p.outreach.last_contact_date }}</div>{% endif %}</td>
-      <td class="small">{{ p.business.last_checked_at|dt }}</td>
     </tr>
   {% endfor %}
   </tbody>
 </table>
 </div>
+<script>
+  document.getElementById('select-all').addEventListener('change', function (e) {
+    document.querySelectorAll('input[name="ids"]').forEach(function (box) { box.checked = e.target.checked; });
+  });
+</script>
 {% endif %}
 {% endblock %}
