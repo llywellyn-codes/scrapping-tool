@@ -19,7 +19,7 @@ below matches that file and that each category can reach exactly its budget.
 |---|---|---:|---|---|
 | Business fit | Roofing is the primary service (`roofing_core_service`) | 10 | Homepage title, H1, meta description or schema.org type names roofing; or a manual check of the website / state license record. |  |
 | Business fit | Serves residential homeowners (`residential_services`) | 6 | Site text mentions residential roofing, homeowners, roof replacement, storm/hail damage or insurance claims. |  |
-| Business fit | Service area is stated (`service_area_stated`) | 6 | Site text says 'serving …', 'service area' or 'areas we serve', or schema.org areaServed. |  |
+| Business fit | Service area is stated (`service_area_stated`) | 6 | Site text says 'serving ...', 'service area' or 'areas we serve', or schema.org areaServed. |  |
 | Business fit | Business appears active (`active_business`) | 4 | Website loads and shows a current copyright year, or business status is operational in a permitted listing source, or confirmed manually. |  |
 | Business fit | Reviews or testimonials are visible (`social_proof`) | 4 | Testimonials/reviews section or review widget on the site, or reviews confirmed manually. |  |
 | Marketing opportunities | No working website (`no_working_website`) | 30 | Website failed to load on two attempts (DNS, connection, TLS, 404 or 5xx), or a manual search confirmed no website exists. A missing URL alone is 'unknown'. | when met, replaces `no_lead_form`, `no_click_to_call`, `no_clear_cta`, `missing_mobile_viewport`, `no_https`, `no_ad_conversion_tracking`, `no_analytics`, `no_chat_or_booking` |

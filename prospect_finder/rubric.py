@@ -118,7 +118,7 @@ SIGNALS: tuple[Signal, ...] = (
     ),
     Signal(
         "service_area_stated", BUSINESS_FIT, "Service area is stated", 6,
-        "Site text says 'serving …', 'service area' or 'areas we serve', or schema.org areaServed.",
+        "Site text says 'serving ...', 'service area' or 'areas we serve', or schema.org areaServed.",
         "Look for a service-area or locations page listing the cities they cover.",
     ),
     Signal(
