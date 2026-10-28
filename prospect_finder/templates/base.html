@@ -19,6 +19,11 @@
   </nav>
 </header>
 <main>
+  {% if running_batch and request.endpoint != 'pf.check_job' %}
+  {% set rc = running_batch.counts %}
+  <div class="banner"><span>Website check batch #{{ running_batch.id }} is {{ running_batch.status }}: {{ rc.completed + rc.failed + rc.skipped }} of {{ rc.total }} done, {{ rc.remaining }} remaining.</span>
+    <a href="{{ url_for('pf.check_job', job_id=running_batch.id) }}">View progress</a></div>
+  {% endif %}
   {% with messages = get_flashed_messages(with_categories=true) %}
     {% for category, message in messages %}<div class="flash {{ category }}">{{ message }}</div>{% endfor %}
   {% endwith %}

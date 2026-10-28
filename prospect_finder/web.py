@@ -11,6 +11,8 @@ from flask import (
     Blueprint, Flask, Response, abort, current_app, flash, g, redirect, render_template, request, session, url_for,
 )
 
+from . import batch
+from .analyzer.fetcher import HostThrottle
 from .audit import AuditRefused, build_audit, polish_with_claude
 from .export import export_prospects_csv, export_suppression_csv
 from .importers import google_places, openstreetmap
@@ -62,7 +64,11 @@ def init_app(app: Flask) -> None:
     def inject():
         if "csrf_token" not in session:
             session["csrf_token"] = secrets.token_hex(16)
+        repo = get_repo()
+        batch.expire_stale_jobs(repo)
+        running = batch.active_job(repo)
         return {
+            "running_batch": batch.job_progress(repo, running["id"]) if running else None,
             "csrf_token": session["csrf_token"],
             "TIER_LABELS": TIER_LABELS,
             "CATEGORY_LABELS": CATEGORY_LABELS,
@@ -106,6 +112,10 @@ def index():
         prospects = [p for p in prospects if p.outreach.get("status") == status]
     if q:
         prospects = [p for p in prospects if q in (p.business.display_name + " " + p.business.location).lower()]
+    check = request.args.get("check", "")
+    if check:
+        wanted = {"unevaluated": {"unevaluated", "no_website"}}.get(check, {check})
+        prospects = [p for p in prospects if p.check_state in wanted]
     sort = request.args.get("sort", "score")
     keys = {
         "score": lambda p: (-p.card.total, -p.card.coverage),
@@ -113,8 +123,18 @@ def index():
         "name": lambda p: p.business.display_name.lower(),
     }
     prospects.sort(key=keys.get(sort, keys["score"]))
+    settings = batch_settings()
+    eligible, left_out = batch.eligible_ids(repo, utcnow(), settings.rules)
+    running = batch.active_job(repo)
+    in_batch = {}
+    if running:
+        for row in repo.conn.execute("SELECT business_id, state FROM check_job_items WHERE job_id = ? "
+                                     "AND state IN ('queued', 'processing')", (running["id"],)):
+            in_batch[row["business_id"]] = row["state"]
     return render_template("index.html", prospects=prospects, statuses=OUTREACH_STATUSES,
-                           filters={"tier": tier, "status": status, "q": q, "sort": sort})
+                           filters={"tier": tier, "status": status, "q": q, "sort": sort, "check": check},
+                           eligible_count=len(eligible), left_out=left_out, batch_size=settings.batch_size,
+                           in_batch=in_batch, latest_batch=batch.latest_job(repo))
 
 
 @bp.post("/prospects/new")
@@ -146,7 +166,7 @@ def prospect(business_id: int):
     repo, b = _load(business_id)
     p = score_business(repo, b)
     return render_template(
-        "prospect.html", p=p, b=b, card=p.card, SignalState=SignalState, statuses=OUTREACH_STATUSES,
+        "prospect.html", p=p, b=b, card=p.card, check=p.check, check_state=p.check_state, SignalState=SignalState, statuses=OUTREACH_STATUSES,
         signals=SIGNALS, outcomes=list(Outcome), evidence_types=list(EvidenceType),
         identity_fields=IDENTITY_FIELDS, scans=repo.scan_history(b.id), sources=policies(cfg().google_places_cache_days),
         batches=repo.batches(),
@@ -337,16 +357,24 @@ def google_client():
 @bp.post("/prospects/<int:business_id>/scan")
 def scan(business_id: int):
     repo, b = _load(business_id)
+    running = batch.active_job(repo)
+    if running and repo.conn.execute(
+            "SELECT 1 FROM check_job_items WHERE job_id = ? AND business_id = ? AND state = 'processing'",
+            (running["id"], business_id)).fetchone():
+        flash(f"Batch #{running['id']} is checking this website right now; its result will appear shortly.", "info")
+        return redirect(url_for("pf.prospect", business_id=business_id))
     try:
-        result = scan_business(repo, b, make_fetcher(cfg()), cfg(), google_client())
+        factory = current_app.extensions.get("pf_fetcher_factory")
+        fetcher = factory(HostThrottle()) if factory else make_fetcher(cfg())
+        result = scan_business(repo, b, fetcher, cfg(), google_client())
     except google_places.GooglePlacesError as exc:
         flash(f"Scan not run: {exc}", "error")
         return redirect(url_for("pf.prospect", business_id=business_id))
     messages = {
-        "ok": "Website scanned",
-        "blocked": "Scan stopped: access restricted (not bypassed)",
-        "unreachable": "Website did not load on two attempts",
-        "no_website": "No website on record to scan",
+        "ok": "Website checked",
+        "blocked": "Check stopped: access restricted (not bypassed)",
+        "failed": "Check failed (not counted as evidence; retry later)",
+        "no_website": "No website on record to check",
     }
     flash(f"{messages.get(result.status, result.status)} — {result.detail}",
           "info" if result.status == "ok" else "error")
@@ -443,3 +471,98 @@ def osm_import():
           f"{counts['merged']} merged, {counts['suppressed']} skipped (opted out). "
           "Data © OpenStreetMap contributors (ODbL).", "info")
     return redirect(url_for("pf.index"))
+
+
+# ---------------------------------------------------------------- bulk website checks
+
+
+def batch_settings(batch_size: int | None = None) -> batch.BatchSettings:
+    return batch.BatchSettings.from_config(cfg(), batch_size)
+
+
+def _start_thread(repo: Repository, job_id: int, settings: batch.BatchSettings) -> None:
+    batch.start_job_thread(cfg().database_path, job_id, cfg(), settings,
+                           google_cache_days=repo.google_cache_days,
+                           fetcher_factory=current_app.extensions.get("pf_fetcher_factory"))
+
+
+@bp.post("/checks/start")
+def start_checks():
+    repo = get_repo()
+    mode = request.form.get("mode", "unevaluated")
+    try:
+        size = int(request.form.get("batch_size") or cfg().check_batch_size)
+    except ValueError:
+        size = cfg().check_batch_size
+    settings = batch_settings(size)
+    ids = []
+    for raw in request.form.getlist("ids"):
+        if raw.isdigit():
+            ids.append(int(raw))
+    if mode == "selected" and not ids:
+        flash("Tick at least one prospect, then click Check selected.", "error")
+        return redirect(request.referrer or url_for("pf.index"))
+    try:
+        job_id = batch.create_job(repo, settings, mode=mode if mode in ("unevaluated", "selected") else "unevaluated",
+                                  selected_ids=ids, force=bool(request.form.get("force")))
+    except batch.BatchBusy as exc:
+        flash(f"A website check batch is already running (#{exc.job_id}). Wait for it to finish or stop it.", "error")
+        return redirect(url_for("pf.check_job", job_id=exc.job_id) if exc.job_id else url_for("pf.index"))
+    except batch.NothingToCheck as exc:
+        flash(str(exc), "info")
+        return redirect(url_for("pf.index"))
+    job = batch.get_job(repo, job_id)
+    if job["status"] == "running":
+        _start_thread(repo, job_id, settings)
+    return redirect(url_for("pf.check_job", job_id=job_id))
+
+
+@bp.get("/checks/<int:job_id>")
+def check_job(job_id: int):
+    repo = get_repo()
+    batch.expire_stale_jobs(repo)
+    progress = batch.job_progress(repo, job_id)
+    if not progress:
+        abort(404)
+    failed_ids = [i["business_id"] for i in progress["items"] if i["state"] == "failed"]
+    return render_template("checks.html", progress=progress, failed_ids=failed_ids)
+
+
+@bp.get("/checks/<int:job_id>/status.json")
+def check_job_status(job_id: int):
+    repo = get_repo()
+    batch.expire_stale_jobs(repo)
+    progress = batch.job_progress(repo, job_id)
+    if not progress:
+        abort(404)
+    keep = ("business_id", "display_name", "state", "result", "detail", "attempts", "started_at", "finished_at")
+    progress["items"] = [{k: i[k] for k in keep} for i in progress["items"]]
+    progress["processing"] = [{k: i[k] for k in keep} for i in progress["processing"]]
+    return progress
+
+
+@bp.post("/checks/<int:job_id>/stop")
+def stop_checks(job_id: int):
+    batch.request_stop(get_repo(), job_id)
+    flash("Stopping after the websites being checked right now. Remaining prospects stay queued; you can resume.",
+          "info")
+    return redirect(url_for("pf.check_job", job_id=job_id))
+
+
+@bp.post("/checks/<int:job_id>/resume")
+def resume_checks(job_id: int):
+    repo = get_repo()
+    job = batch.get_job(repo, job_id)
+    if not job:
+        abort(404)
+    try:
+        batch.resume_job(repo, job_id)
+    except batch.BatchBusy as exc:
+        flash(f"Another batch (#{exc.job_id}) is running.", "error")
+        return redirect(url_for("pf.check_job", job_id=job_id))
+    except ValueError as exc:
+        flash(str(exc), "error")
+        return redirect(url_for("pf.check_job", job_id=job_id))
+    _start_thread(repo, job_id, batch_settings(job["batch_size"]))
+    flash("Batch resumed; finished prospects are not checked again.", "info")
+    return redirect(url_for("pf.check_job", job_id=job_id))

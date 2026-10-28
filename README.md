@@ -81,9 +81,11 @@ pip install -r requirements-dev.txt && pytest
    Google Places, import OpenStreetMap roofers for a state, or add one prospect by hand. Each
    import records the source and its terms. Non-US rows are rejected, duplicates are merged, and
    opted-out businesses are skipped.
-2. **Scan.** Click **Scan website** on a prospect, or run `flask --app prospect_finder scan --all`.
-   The scan fetches up to three public pages, waiting a few seconds between requests (about 10–15 s
-   per site), and records about 20 findings with evidence.
+2. **Check websites.** On the Prospects page, click **Check unevaluated websites** to check a batch
+   (10 by default) in the background, or tick prospects and click **Check selected**. You can also
+   use **Check website** on one prospect's page. Each check reads up to three public pages, waiting
+   a few seconds between requests, and records about 20 findings with evidence. See
+   [Bulk website checks](#bulk-website-checks).
 3. **Review.** The prospect page shows the score card, any review reasons, the next research step
    and every signal with its evidence and the findings that were set aside. Record what you check
    by hand as **manual findings** (source URL and observation required). A manual check beats an
@@ -99,6 +101,40 @@ pip install -r requirements-dev.txt && pytest
    suppression list is a separate download. Each prospect also has a JSON record at
    `/prospects/<id>.json`; the format is described in [docs/OUTPUT.md](docs/OUTPUT.md).
 
+### Bulk website checks
+
+- **Check unevaluated websites** queues up to *batch size* prospects (default 10). It picks, in
+  this order: prospects never checked; prospects whose failed check is due a retry; prospects whose
+  last check is **stale** (older than 90 days, the same limit the scoring uses for website
+  evidence). Prospects checked recently are not checked again.
+- **Check selected** checks only the ticked prospects. Recently checked ones are skipped unless you
+  tick **Re-check selected even if checked recently**. Failed ones are retried straight away.
+- **Progress** opens automatically and updates every 2 seconds: queued, processing (with names),
+  completed, failed, skipped and remaining. Each prospect's result is saved the moment it finishes,
+  so refreshing or closing the browser loses nothing. A banner on every page shows a running batch.
+- **When it finishes**, the summary lists how many were evaluated, failed and skipped, how many
+  prospects still need a check, and why others were left out. Buttons let you check the next
+  batch or retry the failed ones.
+- **Stop and resume.** **Stop after current sites** leaves the rest queued. If the app is closed or
+  crashes mid-batch, the batch shows as *interrupted* about 30 seconds later and **Resume** carries
+  on. Prospects that already finished are not checked again.
+- **Only one batch runs at a time.** A second start is refused, and the database enforces it too.
+- **Failed checks are not evidence.** A site that times out, refuses connections, returns server
+  errors or rate-limits us is marked **Failed**. Its score is not changed and no findings are saved.
+  It is retried automatically after 24 hours (up to 3 failures in a row), or now if you select it.
+- **No paid lookups.** Bulk checks never call Google Places. Prospects imported from Google without
+  a stored website are skipped as "no website on record". Use the single **Check website** button
+  if you want that paid lookup for one prospect.
+- **Filters.** Use **All website checks** to show *Unevaluated* (never checked, or no website),
+  *Evaluated*, *Stale* or *Failed* prospects.
+- **Run one process.** Batches run in a background thread of the app, so start it with
+  `flask run` (one process). Running several server processes behind a load balancer is not
+  supported for batches.
+
+From the command line, `flask --app prospect_finder check-batch` runs the same batch in the
+foreground and prints each result (`--batch-size N`, `--id N` to check selected prospects,
+`--force`, `--resume JOB`).
+
 ### CLI
 
 ```bash
@@ -110,7 +146,15 @@ flask --app prospect_finder osm-import TX --city Dallas
 ```
 
 ```bash
-flask --app prospect_finder scan --all --stale-only
+flask --app prospect_finder check-batch --batch-size 10
+```
+
+```bash
+flask --app prospect_finder check-batch --resume 3
+```
+
+```bash
+flask --app prospect_finder scan --id 12
 ```
 
 ```bash
@@ -156,12 +200,18 @@ or in the database.
 | `ANTHROPIC_API_KEY` | — | Enables the optional audit rewrite |
 | `AUDIT_LLM_MODEL` | `claude-opus-5-5` | Model for the optional rewrite |
 | `AUDIT_SIGNATURE` | — | Your name, company and postal address for audit emails (CAN-SPAM) |
+| `CHECK_BATCH_SIZE` | `10` | Default prospects per bulk check (the Prospects page field overrides it; max 500) |
+| `CHECK_CONCURRENCY` | `3` | Sites checked in parallel during a batch (max 5); requests to one site stay sequential |
+| `CHECK_MAX_RETRIES` | `2` | Extra attempts per request after timeouts, connection errors, HTTP 5xx and 429 |
+| `CHECK_SITE_TIME_LIMIT_SECONDS` | `120` | Time allowed per prospect before its check is marked failed |
+| `CHECK_FAILED_RETRY_HOURS` | `24` | Wait before a failed check is retried automatically |
+| `CHECK_MAX_FAILED_ATTEMPTS` | `3` | Failures in a row after which only "Check selected" retries it |
 
 ## API costs
 
 | Service | What uses it | Cost |
 |---|---|---|
-| Website scanning | Scan website / `scan` | Free (your bandwidth). About 3–4 requests per site |
+| Website checks | Check website / bulk checks | Free (your bandwidth). About 3–4 requests per site, more when retrying |
 | OpenStreetMap Overpass | OSM import | Free public service; keep usage modest |
 | Google Places **Text Search Pro** | Each Google search page (up to 20 results) | First 5,000 calls/month free, then about **$32 per 1,000** |
 | Google Places **Place Details Enterprise** | Scanning a Google-imported prospect with no stored website (one call per scan) | First 1,000 calls/month free, then about **$20 per 1,000** |
@@ -199,6 +249,18 @@ tests/               scoring, unknowns, stale evidence, duplicates, missing sour
 ```
 
 ## Limitations
+
+- Bulk checks run in background threads inside the app. There is no separate job server, so
+  checks only progress while the app is running. A batch interrupted by closing the app resumes
+  only when you click **Resume** (or run `check-batch --resume`).
+- When the app is restarted mid-batch, it waits about 30 seconds without a heartbeat before
+  marking the batch interrupted, so **Resume** appears after that.
+- The database now uses SQLite's WAL mode so pages stay responsive while a batch writes. You will
+  see `prospects.db-wal` and `prospects.db-shm` next to it. To copy the database, stop the app
+  first (or copy all three files).
+- Upgrading from an earlier version backs up the database (`prospects.db.backup-v0-…`), records
+  earlier checks so they are not repeated, and turns old automated "No working website" results
+  into **unknown**. Their text is kept, but they no longer add 30 points.
 
 - The scanner reads HTML and does not run JavaScript. Pages built entirely in JavaScript give
   "unknown" rather than findings. Confirm those by hand.

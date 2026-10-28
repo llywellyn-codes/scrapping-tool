@@ -22,7 +22,7 @@ below matches that file and that each category can reach exactly its budget.
 | Business fit | Service area is stated (`service_area_stated`) | 6 | Site text says 'serving …', 'service area' or 'areas we serve', or schema.org areaServed. |  |
 | Business fit | Business appears active (`active_business`) | 4 | Website loads and shows a current copyright year, or business status is operational in a permitted listing source, or confirmed manually. |  |
 | Business fit | Reviews or testimonials are visible (`social_proof`) | 4 | Testimonials/reviews section or review widget on the site, or reviews confirmed manually. |  |
-| Marketing opportunities | No working website (`no_working_website`) | 30 | Website failed to load on two attempts (DNS, connection, TLS, 404 or 5xx), or a manual search confirmed no website exists. A missing URL alone is 'unknown'. | when met, replaces `no_lead_form`, `no_click_to_call`, `no_clear_cta`, `missing_mobile_viewport`, `no_https`, `no_ad_conversion_tracking`, `no_analytics`, `no_chat_or_booking` |
+| Marketing opportunities | No working website (`no_working_website`) | 30 | A manual check confirmed the website is missing or broken (opened in a browser, or a search found no site). Automated request failures are recorded as failed checks, never as evidence; a missing URL alone is 'unknown'. | when met, replaces `no_lead_form`, `no_click_to_call`, `no_clear_cta`, `missing_mobile_viewport`, `no_https`, `no_ad_conversion_tracking`, `no_analytics`, `no_chat_or_booking` |
 | Marketing opportunities | No lead-capture form found (`no_lead_form`) | 10 | No form with name/email/phone fields (or known form embed) on the homepage or contact page. | shares the `conversion_path` cap of 17 |
 | Marketing opportunities | No tap-to-call phone link (`no_click_to_call`) | 6 | Homepage HTML has no tel: link. | shares the `conversion_path` cap of 17 |
 | Marketing opportunities | No estimate/inspection call-to-action (`no_clear_cta`) | 5 | No link, button or heading on the homepage offering a quote, estimate, inspection or booking. | shares the `conversion_path` cap of 17 |
@@ -138,7 +138,7 @@ confirmed `not_met`, and **Do not contact** when the prospect has opted out.
 ## Next recommended research step
 
 The step is chosen in this order: opted out → not a fit → fix missing evidence → resolve a conflict
-→ confirm a site that would not load → re-check stale evidence → verify a low-confidence finding →
+→ retry a website check that failed → confirm a site that would not load → re-check stale evidence → verify a low-confidence finding →
 run the website scan if it has never run → research the highest-weight unknown signal → manually
 confirm the strongest finding before outreach.
 
@@ -177,6 +177,13 @@ A website scan of a small roofer's site produced these results (all `website_sca
 
 ## Website analyzer checks
 
+**A failed request is never evidence.** When the website cannot be read (DNS failure, timeout,
+connection error, server error, rate limit, unavailable robots.txt, even a 404), the scanner saves
+no findings at all and records the check as **failed**. The prospect's score is not changed by the
+failure; earlier findings are kept and go stale on their own. "No working website" can only be
+recorded by a person who confirmed it. Before giving up, the fetcher retries timeouts, connection
+errors, HTTP 5xx and 429 responses (see [README → Bulk website checks](../README.md#bulk-website-checks)).
+
 The analyzer fetches at most three pages: the homepage, a contact page, and a service-area or
 about page. It reads the HTML only and never runs JavaScript. When the homepage has fewer than 250
 characters of server-rendered text, "absence" checks report **unknown** instead of a problem,
@@ -184,7 +191,7 @@ because the content is probably built by JavaScript.
 
 | Signal | Met when | Not met when | Confidence |
 |---|---|---|---|
-| `no_working_website` | https, http and a retry all fail (DNS, connect, TLS, 4xx/5xx) | homepage loads | 0.80 confirmed failure / 0.95 |
+| `no_working_website` | never set by the scanner: only a manual finding (site confirmed missing or broken in a browser) | homepage loads | not met 0.95 |
 | `roofing_core_service` | schema.org `RoofingContractor`; or roofing in title/H1/meta; or 3+ mentions in text | no mention on checked pages | 0.95 / 0.90 / 0.65 inferred; not met 0.75 |
 | `residential_services` | residential, homeowner, replacement, storm/hail, insurance terms | none found | 0.85; not met 0.60 |
 | `service_area_stated` | schema.org `areaServed`, or "serving <Place>", "service area(s)", "areas we serve" | none found | 0.90 / 0.85; not met 0.60 |
@@ -194,7 +201,7 @@ because the content is probably built by JavaScript.
 | `no_click_to_call` | homepage has no `tel:` link | `tel:` link found | 0.85; not met 0.95 |
 | `no_clear_cta` | no estimate/inspection/quote/booking wording in homepage links, buttons, headings | found | 0.75; not met 0.85 |
 | `missing_mobile_viewport` | no `meta viewport` with `width=device-width` | present | 0.90; not met 0.95 |
-| `no_https` | https fails while http loads, or https redirects to http | https loads | 0.85 confirmed failure / 0.80; not met 0.95 |
+| `no_https` | https fails with a certificate/TLS error while http loads, or https redirects to http (a timeout or connection error on https → unknown) | https loads | 0.85 confirmed failure / 0.80; not met 0.95 |
 | `no_ad_conversion_tracking` | no Google Ads, Meta, Microsoft, LinkedIn, TikTok or Nextdoor tag (inferred) | tag found | 0.70 (0.55 thin page); not met 0.90; GTM present → unknown |
 | `no_analytics` | no analytics or tag-manager script (inferred) | GA4/UA/Clarity/Hotjar/… found, or GTM present (0.60 inferred) | 0.70 (0.55 thin page); not met 0.90 |
 | `no_chat_or_booking` | no known chat/text/booking widget (inferred) | widget or `sms:` link found | 0.65; not met 0.85 |

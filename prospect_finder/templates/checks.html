@@ -1,0 +1,126 @@
+{% extends "base.html" %}
+{% block title %}Website check batch #{{ progress.id }}{% endblock %}
+{% block content %}
+{% set c = progress.counts %}
+<p><a href="{{ url_for('pf.index') }}">← Prospects</a></p>
+<div class="head">
+  <div>
+    <h1>Website check batch #{{ progress.id }}</h1>
+    <div class="muted">{{ 'Selected prospects' if progress.mode == 'selected' else 'Unevaluated and stale prospects' }}
+      · batch size {{ progress.batch_size }}{% if progress.force %} · re-checking recent results{% endif %}
+      · started {{ progress.created_at|dt }}{% if progress.finished_at %} · finished {{ progress.finished_at|dt }}{% endif %}</div>
+  </div>
+  <div class="inline-actions">
+    <span class="cstate cstate-{{ 'processing' if not progress.finished else ('failed' if progress.status == 'interrupted' else 'evaluated') }}" id="job-status">{{ progress.status }}</span>
+    {% if progress.status == 'running' %}
+    <form method="post" action="{{ url_for('pf.stop_checks', job_id=progress.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button class="secondary">Stop after current sites</button></form>
+    {% elif progress.status in ('interrupted', 'stopped') and c.queued %}
+    <form method="post" action="{{ url_for('pf.resume_checks', job_id=progress.id) }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><button>Resume ({{ c.queued }} left)</button></form>
+    {% endif %}
+  </div>
+</div>
+
+{% if progress.status == 'interrupted' %}
+<div class="flash error">This batch was interrupted (the app stopped while it was running). Completed results are saved; resume to check the {{ c.queued }} prospect(s) still queued.</div>
+{% endif %}
+
+<div class="counts">
+  {% for key, label in [('queued', 'Queued'), ('processing', 'Processing'), ('completed', 'Completed'), ('failed', 'Failed'), ('skipped', 'Skipped'), ('remaining', 'Remaining')] %}
+  <div class="count"><div class="n" id="count-{{ key }}">{{ c[key] }}</div><div class="l">{{ label }}</div></div>
+  {% endfor %}
+</div>
+{% set done = c.completed + c.failed + c.skipped %}
+<div class="bigbar"><span id="bar" style="width: {{ ((done / c.total * 100) if c.total else 100)|round }}%"></span></div>
+<p class="small muted" id="processing-line">{% if progress.processing %}Checking now: {% for i in progress.processing %}{{ i.display_name }}{{ ', ' if not loop.last }}{% endfor %}{% endif %}</p>
+
+{% if progress.finished %}
+{% set s = progress.summary %}
+<section class="summary">
+  <h3>Summary</h3>
+  <ul>
+    <li><strong>{{ s.evaluated }}</strong> evaluated{% if s.access_restricted %} ({{ s.access_restricted }} with access restricted, so some signals stay unknown){% endif %}</li>
+    <li><strong>{{ s.failed }}</strong> failed — recorded as failed checks, not as evidence against the business; they are retried automatically after the waiting period, or select them to retry now</li>
+    <li><strong>{{ s.skipped }}</strong> skipped (no website, opted out, or already checked)</li>
+    {% if c.queued %}<li><strong>{{ c.queued }}</strong> still queued in this batch (stopped before finishing)</li>{% endif %}
+    {% if s.remaining_unevaluated is not none %}<li><strong>{{ s.remaining_unevaluated }}</strong> prospects still need a website check (never checked, stale, or a failed check due a retry)</li>{% endif %}
+    {% if s.selected_not_included %}<li><strong>{{ s.selected_not_included }}</strong> selected prospects were not included because of the batch size</li>{% endif %}
+    {% for label, n in s.left_out.items() %}<li class="muted">{{ n }} not eligible: {{ label }}</li>{% endfor %}
+  </ul>
+  <div class="inline-actions">
+    {% if s.remaining_unevaluated %}
+    <form method="post" action="{{ url_for('pf.start_checks') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="mode" value="unevaluated">
+      <input type="hidden" name="batch_size" value="{{ progress.batch_size }}">
+      <button>Check next {{ [progress.batch_size, s.remaining_unevaluated]|min }}</button></form>
+    {% endif %}
+    {% if failed_ids %}
+    <form method="post" action="{{ url_for('pf.start_checks') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="mode" value="selected">
+      <input type="hidden" name="batch_size" value="{{ progress.batch_size }}">
+      {% for i in failed_ids %}<input type="hidden" name="ids" value="{{ i }}">{% endfor %}
+      <button class="secondary">Retry the {{ failed_ids|length }} failed now</button></form>
+    {% endif %}
+    {% if progress.overflow_ids %}
+    <form method="post" action="{{ url_for('pf.start_checks') }}">
+      <input type="hidden" name="csrf_token" value="{{ csrf_token }}"><input type="hidden" name="mode" value="selected">
+      <input type="hidden" name="batch_size" value="{{ progress.batch_size }}">
+      {% if progress.force %}<input type="hidden" name="force" value="1">{% endif %}
+      {% for i in progress.overflow_ids %}<input type="hidden" name="ids" value="{{ i }}">{% endfor %}
+      <button class="secondary">Check the other {{ progress.overflow_ids|length }} selected</button></form>
+    {% endif %}
+    <a href="{{ url_for('pf.index') }}">Back to prospects</a>
+  </div>
+</section>
+{% endif %}
+
+<section>
+  <h2>Prospects in this batch</h2>
+  <div class="table-wrap">
+  <table class="small">
+    <thead><tr><th>Prospect</th><th>State</th><th>Result</th><th class="num" title="How many times this batch started checking it (more than 1 after a resume)">Runs</th><th>Detail</th><th>Finished</th></tr></thead>
+    <tbody id="items">
+    {% for i in progress["items"] %}
+      <tr><td><a href="{{ url_for('pf.prospect', business_id=i.business_id) }}">{{ i.display_name }}</a></td>
+        <td><span class="cstate cstate-{{ {'completed': 'evaluated', 'failed': 'failed', 'processing': 'processing'}.get(i.state, '') }}">{{ i.state }}</span></td>
+        <td>{{ i.result or '' }}</td><td class="num">{{ i.attempts }}</td><td>{{ i.detail or '' }}</td><td>{{ i.finished_at|dt if i.finished_at else '' }}</td></tr>
+    {% endfor %}
+    </tbody>
+  </table>
+  </div>
+</section>
+
+{% if not progress.finished %}
+<script>
+(function () {
+  var url = "{{ url_for('pf.check_job_status', job_id=progress.id) }}";
+  var stateClass = {completed: 'evaluated', failed: 'failed', processing: 'processing'};
+  function esc(s) { var d = document.createElement('div'); d.textContent = s == null ? '' : String(s); return d.innerHTML; }
+  function render(p) {
+    ['queued', 'processing', 'completed', 'failed', 'skipped', 'remaining'].forEach(function (k) {
+      document.getElementById('count-' + k).textContent = p.counts[k];
+    });
+    var done = p.counts.completed + p.counts.failed + p.counts.skipped;
+    document.getElementById('bar').style.width = (p.counts.total ? Math.round(done / p.counts.total * 100) : 100) + '%';
+    document.getElementById('job-status').textContent = p.status;
+    document.getElementById('processing-line').textContent = p.processing.length ?
+      'Checking now: ' + p.processing.map(function (i) { return i.display_name; }).join(', ') : '';
+    document.getElementById('items').innerHTML = p.items.map(function (i) {
+      return '<tr><td><a href="/prospects/' + i.business_id + '">' + esc(i.display_name) + '</a></td>' +
+        '<td><span class="cstate cstate-' + (stateClass[i.state] || '') + '">' + esc(i.state) + '</span></td>' +
+        '<td>' + esc(i.result) + '</td><td class="num">' + esc(i.attempts) + '</td><td>' + esc(i.detail) + '</td>' +
+        '<td>' + esc(i.finished_at ? i.finished_at.slice(0, 16).replace('T', ' ') : '') + '</td></tr>';
+    }).join('');
+    if (p.finished) { window.location.reload(); }
+  }
+  function poll() {
+    fetch(url, {headers: {'Accept': 'application/json'}}).then(function (r) { return r.json(); })
+      .then(function (p) { render(p); if (!p.finished) { setTimeout(poll, 2000); } })
+      .catch(function () { setTimeout(poll, 5000); });
+  }
+  setTimeout(poll, 1500);
+})();
+</script>
+{% endif %}
+{% endblock %}

@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import threading
+
 import requests
 
 
@@ -21,22 +23,30 @@ class FakeResponse:
 
 
 class FakeSession:
-    """Maps URL -> FakeResponse, or -> an exception instance to raise. Unlisted robots.txt = 404."""
+    """Maps URL -> FakeResponse or an exception instance to raise, or -> a list of those returned in turn
+    (the last one repeats). Unlisted robots.txt = 404; any other unlisted URL fails DNS resolution."""
 
     def __init__(self, routes: dict):
         self.routes = routes
         self.requests: list[tuple[str, dict]] = []
+        self._lock = threading.Lock()
 
     def get(self, url, headers=None, timeout=None, allow_redirects=True, stream=False):
-        self.requests.append((url, headers or {}))
-        if url not in self.routes:
+        with self._lock:
+            self.requests.append((url, headers or {}))
+            route = self.routes.get(url)
+            if isinstance(route, list):
+                route = route.pop(0) if len(route) > 1 else route[0]
+        if route is None:
             if url.endswith("/robots.txt"):
                 return FakeResponse(404, "not found", {"Content-Type": "text/plain"})
             raise requests.exceptions.ConnectionError(f"Failed to resolve host for {url} (name resolution)")
-        route = self.routes[url]
         if isinstance(route, Exception):
             raise route
         return route
+
+    def count(self, url: str) -> int:
+        return sum(1 for u, _ in self.requests if u == url)
 
 
 class FakeClock:

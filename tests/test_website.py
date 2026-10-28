@@ -115,15 +115,12 @@ def test_javascript_shell_page_reports_unknown_instead_of_problems():
     assert found["roofing_core_service"].outcome == Outcome.MET  # presence is still observable
 
 
-def test_unreachable_site_is_a_confirmed_failure_after_two_attempts():
+def test_unreachable_site_is_a_failed_check_not_evidence():
     f, _ = fetcher({})
     result = analyze_website("gone-roofing.example", f, now=NOW)
-    assert result.status == "unreachable"
-    found = by_key(result)
-    nw = found["no_working_website"]
-    assert nw.outcome == Outcome.MET and nw.evidence_type == EvidenceType.CONFIRMED_FAILURE
-    assert "retry" in nw.test_result and evidence_problems(nw) == []
-    assert all(found[k].outcome == Outcome.UNKNOWN for k in WEBSITE_SIGNALS if k != "no_working_website")
+    assert result.status == "failed" and result.temporary
+    assert result.findings == []  # a failed request says nothing about the business's website
+    assert "DNS lookup failed" in result.detail
 
 
 def test_http_only_site_is_flagged_for_https():
@@ -149,8 +146,11 @@ def test_robots_disallow_is_respected():
 
 def test_robots_server_error_means_do_not_crawl():
     f, _ = fetcher({"https://flaky.example/robots.txt": FakeResponse(503, "down"),
+                    "http://flaky.example/robots.txt": FakeResponse(503, "down"),
                     "https://flaky.example/": FakeResponse(200, GOOD_HOME)})
-    assert analyze_website("flaky.example", f, now=NOW).status == "blocked"
+    result = analyze_website("flaky.example", f, now=NOW)
+    assert result.status == "failed" and result.temporary and result.findings == []
+    assert not any(u.endswith(".example/") for u, _ in f.session.requests)  # the page itself was never fetched
 
 
 def test_captcha_challenge_is_not_bypassed():
@@ -171,9 +171,13 @@ def test_recaptcha_on_a_normal_contact_form_is_not_treated_as_a_block():
 
 
 def test_login_and_forbidden_responses_stop_the_scan():
-    for status in (401, 403, 429):
+    for status in (401, 403):
         f, _ = fetcher({"https://locked.example/": FakeResponse(status, "no")})
         assert analyze_website("locked.example", f, now=NOW).status == "blocked"
+    # 429 is a temporary "slow down", retried and then reported as a failed check, not as blocked.
+    f, _ = fetcher({"https://busy.example/": FakeResponse(429, "slow down", {"Retry-After": "1"})}, jitter=lambda: 0)
+    result = analyze_website("busy.example", f, now=NOW)
+    assert result.status == "failed" and result.temporary and result.findings == []
     f, _ = fetcher({"https://portal.example/": FakeResponse(302, "", {"Location": "/wp-login.php"})})
     result = analyze_website("portal.example", f, now=NOW)
     assert result.status == "blocked" and "login" in result.detail

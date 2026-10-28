@@ -33,15 +33,26 @@ you do not tick export, those fields are withheld from CSV exports and the expor
 ## Website scanning rules
 
 - **robots.txt (RFC 9309).** The scanner checks robots.txt for every origin and redirect target. A
-  missing file (4xx) allows crawling. A server error (5xx) means do not crawl. `Crawl-delay` is
-  honoured when it is longer than the configured delay.
-- **Rate limit.** One request at a time per host, at least `CRAWLER_MIN_DELAY_SECONDS` apart
-  (default 3 s). Bulk scans run one site after another. Each site gets at most
-  `CRAWLER_MAX_PAGES_PER_SITE` pages (default 3) plus robots.txt.
-- **No bypassing.** HTTP 401/403/407/429, redirects to login pages, and CAPTCHA or bot-challenge
-  pages stop the scan. The checks they block are recorded as **unknown** with the reason. After a
-  429 the scanner makes no more requests to that host in the run. It never submits forms, logs
-  in, solves CAPTCHAs, rotates IPs or spoofs a browser.
+  missing file (4xx) allows crawling. If robots.txt keeps returning server errors, the site is not
+  crawled and the check is recorded as failed (temporary). `Crawl-delay` is honoured when it is
+  longer than the configured delay.
+- **Rate limit and concurrency.** One request at a time per host, at least
+  `CRAWLER_MIN_DELAY_SECONDS` apart (default 3 s). The spacing is shared by all bulk-check workers.
+  Bulk checks work on up to `CHECK_CONCURRENCY` different sites at once (default 3, maximum 5).
+  Each site gets at most `CRAWLER_MAX_PAGES_PER_SITE` pages (default 3) plus robots.txt, and at
+  most `CHECK_SITE_TIME_LIMIT_SECONDS` (default 120 s).
+- **Retries and timeouts.** Each request has a 5 s connect and `CRAWLER_TIMEOUT_SECONDS` (15 s)
+  read timeout. Timeouts, connection errors and HTTP 500/502/503/504 are retried up to
+  `CHECK_MAX_RETRIES` times (default 2) after 2 s, then 4 s (plus a little jitter). DNS failures
+  are retried once. A 429 "slow down" is retried after its `Retry-After` time if that is 30 s or
+  less; otherwise, or if it repeats, the check fails and no more requests go to that host in the
+  run. TLS errors and 404s are not retried.
+- **Failures are not evidence.** A site that cannot be read is a failed check, not a finding. Failed
+  checks are retried automatically by later bulk runs after `CHECK_FAILED_RETRY_HOURS` (24 h), and
+  after `CHECK_MAX_FAILED_ATTEMPTS` (3) failures in a row only when you select them.
+- **No bypassing.** HTTP 401/403/407, redirects to login pages, and CAPTCHA or bot-challenge pages
+  stop the scan. The checks they block are recorded as **unknown** with the reason. The scanner
+  never submits forms, logs in, solves CAPTCHAs, rotates IPs or spoofs a browser.
 - **Identification.** Requests send `User-Agent: RoofingProspectFinder/1.0 (+manual business
   research; contact: $CRAWLER_CONTACT)`. Set `CRAWLER_CONTACT` to an email or URL where site
   owners can reach you.
@@ -63,9 +74,10 @@ Google Business Profile information is used only through Google's official, paid
   allows it.
 - **With the default of 0:**
   1. Search results are shown live with Google attribution, and importing keeps only the place ID.
-  2. "Scan website" makes one live Place Details call to get the website URL for that scan. The
+  2. "Check website" makes one live Place Details call to get the website URL for that scan. The
      URL is stored only after the business's own site confirms it, and then as a `website_scan`
-     fact.
+     fact. Bulk website checks never make this paid call; those prospects are skipped as "no website
+     on record".
   3. Places-derived findings (operational status, review count) are not stored, so "Fewer than 25
      Google reviews" stays unknown unless a researcher records it as a manual finding.
 - **Export and audits.** Google content is never included in CSV exports. Google-sourced findings

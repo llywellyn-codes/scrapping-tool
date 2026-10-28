@@ -3,17 +3,16 @@
 from __future__ import annotations
 
 import json
-from datetime import timedelta
 from pathlib import Path
 
 import click
 from flask import Flask, current_app
 
+from . import batch
 from .export import export_prospects_csv, export_suppression_csv
 from .importers import openstreetmap
 from .importers.csv_import import import_csv
 from .importers.google_places import GooglePlacesClient, GooglePlacesError
-from .models import utcnow
 from .output import export_prospects_json, prospect_record
 from .repository import Repository, connect, init_db
 from .scanner import make_fetcher, scan_business
@@ -26,6 +25,36 @@ def _repo() -> Repository:
     conn = connect(cfg.database_path)
     init_db(conn)
     return Repository(conn, google_cache_days=cfg.google_places_cache_days)
+
+
+def _run_batch(repo: Repository, cfg, settings, mode: str, ids: list[int], force: bool) -> None:
+    try:
+        job_id = batch.create_job(repo, settings, mode=mode, selected_ids=ids, force=force)
+    except batch.BatchBusy as exc:
+        raise click.ClickException(f"Batch #{exc.job_id} is already running.") from None
+    except batch.NothingToCheck as exc:
+        click.echo(str(exc))
+        return
+    _follow(repo, cfg, job_id, settings)
+
+
+def _follow(repo: Repository, cfg, job_id: int, settings) -> None:
+    """Run a job in the foreground, printing each prospect as it finishes, then the summary."""
+    queued = batch.job_progress(repo, job_id)["counts"]["queued"]
+    click.echo(f"Batch #{job_id}: {queued} prospect(s) queued, up to {settings.concurrency} at a time")
+    if queued:
+        def show(business_id, state):
+            b = repo.get_business(business_id)
+            click.echo(f"  #{business_id} {b.display_name if b else ''}: {state}")
+        batch.run_job(cfg.database_path, job_id, cfg, settings, google_cache_days=repo.google_cache_days,
+                      on_item=show)
+    p = batch.job_progress(repo, job_id)
+    s = p["summary"]
+    click.echo(f"Batch #{job_id} {p['status']}: {s['evaluated']} evaluated, {s['failed']} failed, "
+               f"{s['skipped']} skipped, {p['counts']['queued']} still queued; "
+               f"{s['remaining_unevaluated']} prospect(s) still need a check.")
+    for label, n in s["left_out"].items():
+        click.echo(f"  not eligible: {n} {label}")
 
 
 def init_app(app: Flask) -> None:
@@ -62,23 +91,22 @@ def init_app(app: Flask) -> None:
         click.echo(openstreetmap.import_osm(_repo(), records, f"{city + ', ' if city else ''}{state.upper()}"))
 
     @app.cli.command("scan")
-    @click.option("--id", "ids", type=int, multiple=True, help="Prospect ID (repeatable).")
-    @click.option("--all", "scan_all", is_flag=True, help="Scan every prospect with a website.")
-    @click.option("--stale-only", is_flag=True, help="With --all: skip prospects checked in the last 30 days.")
+    @click.option("--id", "ids", type=int, multiple=True, help="Prospect ID (repeatable); always checked.")
+    @click.option("--all", "scan_all", is_flag=True, help="Same as check-batch with no size limit.")
+    @click.option("--stale-only", is_flag=True, hidden=True)  # kept for old scripts; --all now skips fresh checks
     def scan_cmd(ids, scan_all, stale_only):
-        """Scan public websites (sequential, rate-limited, robots.txt respected)."""
+        """Check websites (sequential per site, rate-limited, robots.txt respected)."""
         cfg = current_app.config["PF"]
         repo = _repo()
+        if scan_all and not ids:
+            _run_batch(repo, cfg, batch.BatchSettings.from_config(cfg, batch.MAX_BATCH_SIZE), "unevaluated", [], False)
+            return
+        if not ids:
+            raise click.UsageError("Pass --id N or --all.")
         fetcher = make_fetcher(cfg)
         google = GooglePlacesClient(cfg.google_places_api_key) if cfg.google_places_api_key else None
-        targets = [repo.get_business(i) for i in ids] if ids else (repo.list_businesses() if scan_all else [])
-        if not targets:
-            raise click.UsageError("Pass --id N or --all.")
-        cutoff = utcnow() - timedelta(days=30)
-        for b in targets:
+        for b in (repo.get_business(i) for i in ids):
             if b is None:
-                continue
-            if stale_only and b.last_checked_at and b.last_checked_at > cutoff:
                 continue
             if repo.get_outreach(b.id).get("opted_out"):
                 click.echo(f"#{b.id} skipped (opted out)")
@@ -89,6 +117,22 @@ def init_app(app: Flask) -> None:
                 click.echo(f"#{b.id} {b.display_name}: skipped - {exc}")
                 continue
             click.echo(f"#{b.id} {b.display_name}: {result.status} - {result.detail}")
+
+    @app.cli.command("check-batch")
+    @click.option("--batch-size", type=int, default=None, help="Prospects per batch (default CHECK_BATCH_SIZE).")
+    @click.option("--id", "ids", type=int, multiple=True, help="Check these prospects only (like 'Check selected').")
+    @click.option("--force", is_flag=True, help="With --id: re-check even if checked recently.")
+    @click.option("--resume", "resume_id", type=int, default=None, help="Resume an interrupted or stopped batch.")
+    def check_batch_cmd(batch_size, ids, force, resume_id):
+        """Check unevaluated, stale or retry-due websites in one batch (the Prospects page button)."""
+        cfg = current_app.config["PF"]
+        repo = _repo()
+        settings = batch.BatchSettings.from_config(cfg, batch_size)
+        if resume_id:
+            batch.resume_job(repo, resume_id)
+            _follow(repo, cfg, resume_id, settings)
+            return
+        _run_batch(repo, cfg, settings, "selected" if ids else "unevaluated", list(ids), force)
 
     @app.cli.command("report")
     @click.option("--id", "business_id", type=int, default=None)

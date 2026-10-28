@@ -11,7 +11,7 @@
     {% if b.website or b.google_place_id %}
     <form method="post" action="{{ url_for('pf.scan', business_id=b.id) }}">
       <input type="hidden" name="csrf_token" value="{{ csrf_token }}">
-      <button title="Fetch up to a few public pages, respecting robots.txt and rate limits">Scan website</button>
+      <button title="Fetch up to a few public pages, respecting robots.txt and rate limits">Check website</button>
     </form>
     {% endif %}
     <a class="button secondary" href="{{ url_for('pf.audit', business_id=b.id) }}">Audit draft</a>
@@ -19,6 +19,9 @@
   </div>
 </div>
 
+{% if check_state == 'failed' %}<div class="flash error">Last website check failed on {{ check.last_attempt_at|dt }}{% if check.consecutive_failures > 1 %} ({{ check.consecutive_failures }} times in a row){% endif %}: {{ check.detail }}. A failed request is not counted as evidence; retry later.</div>
+{% elif check_state == 'stale' %}<div class="flash">Website check is stale (last checked {{ check.checked_at|dt }}); its findings no longer count until it is re-checked.</div>
+{% endif %}
 {% if p.outreach.opted_out %}<div class="flash error">Opted out on {{ p.outreach.opted_out_at|dt }}. Do not contact.</div>{% endif %}
 
 <section class="scorecard">

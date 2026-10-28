@@ -12,3 +12,20 @@
     {% if f.source_url %}<div class="small"><a href="{{ f.source_url }}" rel="noopener noreferrer" target="_blank">{{ f.source_url }}</a></div>{% endif %}
   {% endif %}
 {%- endmacro %}
+
+{% macro check_badge(p) -%}
+  {% set ck = p.check %}
+  {% if p.check_state == 'evaluated' %}
+    <span class="cstate cstate-evaluated">{{ 'Access restricted' if ck.status == 'blocked' else 'Checked' }}</span>
+    <div class="muted small">{{ ck.checked_at|dt }}</div>
+  {% elif p.check_state == 'stale' %}
+    <span class="cstate cstate-stale">Stale</span><div class="muted small">checked {{ ck.checked_at|dt }}</div>
+  {% elif p.check_state == 'failed' %}
+    <span class="cstate cstate-failed" title="{{ ck.detail }}">Failed{% if ck.consecutive_failures > 1 %} ×{{ ck.consecutive_failures }}{% endif %}</span>
+    <div class="muted small">{{ ck.last_attempt_at|dt }}</div>
+  {% elif p.check_state == 'no_website' or not p.business.website %}
+    <span class="cstate">No website</span>
+  {% else %}
+    <span class="cstate">Not checked</span>
+  {% endif %}
+{%- endmacro %}

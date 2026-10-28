@@ -36,6 +36,13 @@ class Config:
     anthropic_api_key: str = ""
     audit_llm_model: str = "claude-opus-5-5"
     audit_signature: str = ""
+    # Bulk website checks.
+    check_batch_size: int = 10
+    check_concurrency: int = 3            # sites checked in parallel (capped at 5)
+    check_max_retries: int = 2            # extra attempts per request for timeouts, 5xx and 429
+    check_site_time_limit: float = 120.0  # seconds per prospect before the check is marked failed
+    check_failed_retry_hours: float = 24.0
+    check_max_failed_attempts: int = 3
 
     @classmethod
     def from_env(cls) -> "Config":
@@ -52,6 +59,12 @@ class Config:
             anthropic_api_key=os.environ.get("ANTHROPIC_API_KEY", ""),
             audit_llm_model=os.environ.get("AUDIT_LLM_MODEL", cls.audit_llm_model),
             audit_signature=os.environ.get("AUDIT_SIGNATURE", ""),
+            check_batch_size=_int("CHECK_BATCH_SIZE", 10),
+            check_concurrency=_int("CHECK_CONCURRENCY", 3),
+            check_max_retries=_int("CHECK_MAX_RETRIES", 2),
+            check_site_time_limit=_float("CHECK_SITE_TIME_LIMIT_SECONDS", 120.0),
+            check_failed_retry_hours=_float("CHECK_FAILED_RETRY_HOURS", 24.0),
+            check_max_failed_attempts=_int("CHECK_MAX_FAILED_ATTEMPTS", 3),
         )
 
     @property
