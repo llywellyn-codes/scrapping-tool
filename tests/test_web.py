@@ -97,3 +97,13 @@ def test_audit_page_uses_verified_findings_only(client):
 def test_rubric_and_duplicates_pages_render(client):
     assert "Marketing opportunities" in client.get("/rubric").get_data(as_text=True)
     assert client.get("/duplicates").status_code == 200
+
+
+def test_json_endpoints(client):
+    upload(client)
+    rec = client.get("/prospects/1.json").get_json()
+    assert rec["business"]["business_id"] == "1" and rec["business"]["phone"] == "+12145550142"
+    assert rec["scoring"]["review_status"] == "needs_manual_verification"
+    assert {f["signal"] for f in rec["findings"]} >= {"no_lead_form", "roofing_core_service"}
+    data = client.get("/export.json").get_json()
+    assert data["count"] == 3

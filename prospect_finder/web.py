@@ -16,6 +16,7 @@ from .export import export_prospects_csv, export_suppression_csv
 from .importers import google_places, openstreetmap
 from .importers.csv_import import import_csv
 from .models import EvidenceType, Finding, Outcome, utcnow
+from .output import export_prospects_json, prospect_record
 from .repository import IDENTITY_FIELDS, OUTREACH_STATUSES, EvidenceError, Provenance, Repository, connect, init_db
 from .rubric import CATEGORY_LABELS, CATEGORY_MAX, DEFAULT_POLICY, GROUPS, SIGNALS, SIGNALS_BY_KEY
 from .scanner import make_fetcher, scan_business
@@ -292,6 +293,24 @@ def export_csv():
     stamp = utcnow().strftime("%Y%m%d")
     return Response(body, mimetype="text/csv",
                     headers={"Content-Disposition": f"attachment; filename=prospects-{stamp}.csv"})
+
+
+@bp.get("/export.json")
+def export_json():
+    repo = get_repo()
+    body = export_prospects_json(repo, all_prospects(repo))
+    stamp = utcnow().strftime("%Y%m%d")
+    return Response(body, mimetype="application/json",
+                    headers={"Content-Disposition": f"attachment; filename=prospects-{stamp}.json"})
+
+
+@bp.get("/prospects/<int:business_id>.json")
+def prospect_json(business_id: int):
+    repo, b = _load(business_id)
+    repo.purge_expired()
+    record = prospect_record(score_business(repo, repo.get_business(business_id)), repo.batches(),
+                             repo.google_cache_days)
+    return Response(json.dumps(record, indent=2), mimetype="application/json")
 
 
 @bp.get("/export/suppression.csv")

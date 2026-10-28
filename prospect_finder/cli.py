@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 from datetime import timedelta
 from pathlib import Path
 
@@ -13,6 +14,7 @@ from .importers import openstreetmap
 from .importers.csv_import import import_csv
 from .importers.google_places import GooglePlacesClient, GooglePlacesError
 from .models import utcnow
+from .output import export_prospects_json, prospect_record
 from .repository import Repository, connect, init_db
 from .scanner import make_fetcher, scan_business
 from .scoring import TIER_LABELS
@@ -90,10 +92,16 @@ def init_app(app: Flask) -> None:
 
     @app.cli.command("report")
     @click.option("--id", "business_id", type=int, default=None)
-    def report_cmd(business_id):
+    @click.option("--json", "as_json", is_flag=True, help="Print JSON records (export rules applied).")
+    def report_cmd(business_id, as_json):
         """Print score cards."""
         repo = _repo()
         prospects = [score_business(repo, repo.get_business(business_id))] if business_id else all_prospects(repo)
+        if as_json:
+            batches = repo.batches()
+            records = [prospect_record(p, batches, repo.google_cache_days) for p in prospects]
+            click.echo(json.dumps(records[0] if business_id else records, indent=2))
+            return
         for p in sorted(prospects, key=lambda p: -p.card.total):
             c = p.card
             cats = " / ".join(f"{cs.score:g}" for cs in c.categories.values())
@@ -110,9 +118,14 @@ def init_app(app: Flask) -> None:
     @click.argument("path", type=click.Path(dir_okay=False))
     @click.option("--suppression", is_flag=True, help="Export the opt-out suppression list instead.")
     def export_cmd(path, suppression):
-        """Write the exportable prospect fields (or the suppression list) to CSV."""
+        """Write exportable prospect fields to CSV, or JSON when PATH ends in .json (or the suppression list)."""
         repo = _repo()
-        text = export_suppression_csv(repo) if suppression else export_prospects_csv(repo, all_prospects(repo))
+        if suppression:
+            text = export_suppression_csv(repo)
+        elif path.lower().endswith(".json"):
+            text = export_prospects_json(repo, all_prospects(repo))
+        else:
+            text = export_prospects_csv(repo, all_prospects(repo))
         Path(path).write_text(text, encoding="utf-8")
         click.echo(f"wrote {path}")
 

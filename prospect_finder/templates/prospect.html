@@ -15,6 +15,7 @@
     </form>
     {% endif %}
     <a class="button secondary" href="{{ url_for('pf.audit', business_id=b.id) }}">Audit draft</a>
+    <a class="button secondary" href="{{ url_for('pf.prospect_json', business_id=b.id) }}">JSON</a>
   </div>
 </div>
 

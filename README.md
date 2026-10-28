@@ -94,9 +94,10 @@ pip install -r requirements-dev.txt && pytest
    with Claude. The rewrite is thrown away if it adds any number or claim.
 6. **Outreach.** Track status, last contact date and response. **Mark opted out** is permanent and
    feeds the suppression list.
-7. **Export.** **Export CSV** includes only fields whose source allows export. Withheld fields are
-   named with the reason. Opted-out prospects are excluded, and the suppression list is a separate
-   download.
+7. **Export.** **Export CSV** and **Export JSON** include only fields whose source allows export.
+   Withheld fields are named with the reason. Opted-out prospects are excluded, and the
+   suppression list is a separate download. Each prospect also has a JSON record at
+   `/prospects/<id>.json`; the format is described in [docs/OUTPUT.md](docs/OUTPUT.md).
 
 ### CLI
 
@@ -118,6 +119,14 @@ flask --app prospect_finder report
 
 ```bash
 flask --app prospect_finder export prospects.csv
+```
+
+```bash
+flask --app prospect_finder export prospects.json
+```
+
+```bash
+flask --app prospect_finder report --id 1 --json
 ```
 
 ```bash
@@ -183,7 +192,8 @@ prospect_finder/
   analyzer/          polite fetcher (robots, rate limits, no bypass) and website checks
   importers/         CSV, Google Places (New), OpenStreetMap Overpass
   audit.py           template audit + optional guarded Claude rewrite
-  export.py          export of permitted fields only
+  export.py          CSV export of permitted fields only
+  output.py          per-prospect JSON record (docs/OUTPUT.md)
   web.py, cli.py     Flask UI and commands
 tests/               scoring, unknowns, stale evidence, duplicates, missing sources, analyzer, web
 ```
